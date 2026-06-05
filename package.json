@@ -1,0 +1,65 @@
+{
+  "name": "fww-shipping-desktop",
+  "version": "1.0.0",
+  "description": "Fuzzywumpets Shipping — desktop app with background printing",
+  "author": "Fuzzywumpets",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.0",
+    "electron-updater": "^6.3.0"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.fuzzywumpets.shipping",
+    "productName": "FWW Shipping",
+    "copyright": "Copyright © 2026 Fuzzywumpets",
+    "icon": "assets/icon.png",
+    "publish": {
+      "provider": "github",
+      "owner": "fuzzyalex84",
+      "repo": "fww-shipping-desktop"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FWW Shipping",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "license": null
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "print-manager.html",
+      "auth.html",
+      "assets/**"
+    ]
+  }
+}
