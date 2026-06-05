@@ -52,10 +52,84 @@ let quitting          = false;   // true when user explicitly quits
 
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark';
+  buildAppMenu();
   createMainWindow();
   createTray();
   setupAutoUpdater();
 });
+
+// ─── Application menu (makes Print Settings discoverable in the menu bar) ──────
+
+function buildAppMenu() {
+  const settings = store.get('printSettings');
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Reload App', accelerator: 'CmdOrCtrl+R', click: () => mainWindow?.reload() },
+        { type: 'separator' },
+        { label: 'Quit FWW Shipping', accelerator: 'CmdOrCtrl+Q', click: () => { quitting = true; app.quit(); } },
+      ],
+    },
+    {
+      label: 'Printing',
+      submenu: [
+        { label: 'Print Settings…', accelerator: 'CmdOrCtrl+P', click: () => openPrintManager() },
+        { type: 'separator' },
+        {
+          label: 'Auto-print Labels',
+          type: 'checkbox',
+          checked: !!settings.autoPrintLabels,
+          click: (item) => {
+            const s = store.get('printSettings');
+            store.set('printSettings', { ...s, autoPrintLabels: item.checked });
+            updateTrayMenu();
+          },
+        },
+        {
+          label: 'Auto-print Slips',
+          type: 'checkbox',
+          checked: !!settings.autoPrintSlips,
+          click: (item) => {
+            const s = store.get('printSettings');
+            store.set('printSettings', { ...s, autoPrintSlips: item.checked });
+            updateTrayMenu();
+          },
+        },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        { label: 'Developer Tools', accelerator: 'F12', click: () => mainWindow?.webContents.toggleDevTools() },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'Check for Updates', click: () => { try { autoUpdater.checkForUpdates(); } catch (_) {} } },
+        { label: 'About', click: () => {
+          dialog.showMessageBox(mainWindow, {
+            type: 'info', title: 'FWW Shipping',
+            message: 'FWW Shipping ' + app.getVersion(),
+            detail: 'Desktop shell for shipping.fuzzyreporting.com with background printing.\nPrint Settings: menu Printing → Print Settings… (or the 🖨 button / tray icon).',
+            buttons: ['OK'],
+          });
+        } },
+      ],
+    },
+  ]);
+  Menu.setApplicationMenu(menu);
+}
 
 app.on('second-instance', () => {
   if (mainWindow) {

@@ -1,6 +1,6 @@
 {
   "name": "fww-shipping-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Fuzzywumpets Shipping — desktop app with background printing",
   "author": "Fuzzywumpets",
   "main": "main.js",
