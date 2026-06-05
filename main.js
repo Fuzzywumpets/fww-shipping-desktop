@@ -141,10 +141,9 @@ app.on('second-instance', () => {
 app.on('before-quit', () => { quitting = true; });
 
 app.on('window-all-closed', () => {
-  // Keep process alive for background printing; only quit on explicit action
-  if (process.platform !== 'darwin') {
-    // Don't quit — tray keeps app alive
-  }
+  // Closing the window fully exits the app — no lingering background instance
+  // that would hold the single-instance lock and block reopening.
+  app.quit();
 });
 
 // ─── Main window ─────────────────────────────────────────────────────────────
@@ -177,23 +176,15 @@ function createMainWindow() {
     }
   });
 
-  // Minimize to tray instead of closing
-  mainWindow.on('close', (e) => {
-    if (!quitting) {
-      e.preventDefault();
-      mainWindow.hide();
-      if (process.platform === 'win32') {
-        // Show tray balloon on first hide
-        if (!store.get('trayHintShown')) {
-          tray?.displayBalloon?.({
-            iconType: 'info',
-            title:    APP_NAME,
-            content:  'FWW Shipping is still running in the background for auto-printing.',
-          });
-          store.set('trayHintShown', true);
-        }
-      }
-    }
+  // Closing the window quits the whole app — no lingering background instance.
+  // Destroy any hidden print/helper windows first so nothing keeps the process
+  // (and the single-instance lock) alive.
+  mainWindow.on('close', () => {
+    quitting = true;
+    BrowserWindow.getAllWindows().forEach((w) => {
+      if (w !== mainWindow) { try { w.destroy(); } catch (_) {} }
+    });
+    app.quit();
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
