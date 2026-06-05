@@ -5,7 +5,7 @@ const {
   session, shell, dialog, nativeTheme, systemPreferences
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const Store = require('electron-store');
+const Store = require('electron-store').default || require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
