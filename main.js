@@ -311,6 +311,11 @@ function isSlipRenderUrl(url) {
 }
 
 function handleSlipPrint(slipUrl) {
+  // Manual PDF override (Output: Save PDF). Render the slips to a PDF and let the
+  // user choose where to save — never silent-print in this mode.
+  if (/[?&]out=pdf/.test(slipUrl)) {
+    return handleSlipSavePdf(slipUrl);
+  }
   const settings = store.get('printSettings');
   if (!settings.autoPrintSlips) {
     // Auto-print off: open in default browser so user can print manually
@@ -330,6 +335,51 @@ function handleSlipPrint(slipUrl) {
     return;
   }
   silentPrintUrl(slipUrl, 'slip', settings);
+}
+
+// ─── Save packing slips / pick list to a PDF (manual override) ───────────────
+
+function handleSlipSavePdf(url) {
+  const fs = require('fs');
+  const path = require('path');
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      partition:        'persist:shipping',
+      contextIsolation: true,
+      nodeIntegration:  false,
+    },
+  });
+  // Neutralize the page's own window.print() so only our printToPDF runs.
+  win.webContents.on('dom-ready', () => {
+    win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  });
+  win.webContents.on('did-finish-load', () => {
+    setTimeout(() => {
+      win.webContents.printToPDF({
+        printBackground: true,
+        pageSize:        'Letter',
+        margins:         { marginType: 'default' },
+      }).then(async (data) => {
+        const defName = 'packing-slips-' + new Date().toISOString().slice(0, 10) + '.pdf';
+        const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+          title:       'Save Packing Slips as PDF',
+          defaultPath: path.join(app.getPath('downloads'), defName),
+          filters:     [{ name: 'PDF', extensions: ['pdf'] }],
+        });
+        if (!canceled && filePath) {
+          fs.writeFileSync(filePath, data);
+          if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: filePath });
+        }
+        win.destroy();
+      }).catch((err) => {
+        console.error('[fww-print] slip PDF save failed:', err);
+        if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(err) });
+        win.destroy();
+      });
+    }, 500);
+  });
+  win.loadURL(url);
 }
 
 // ─── Silent printing via hidden BrowserWindow ────────────────────────────────
