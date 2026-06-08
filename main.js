@@ -311,8 +311,10 @@ function isSlipRenderUrl(url) {
 }
 
 function handleSlipPrint(slipUrl) {
-  // Manual PDF override (Output: Save PDF). Render the slips to a PDF and let the
-  // user choose where to save — never silent-print in this mode.
+  // "Open as PDF" — render the slips to a PDF in an authenticated hidden window and
+  // let the user save it (default name packingslips-YYMMDD-HHMMSS.pdf). Controlled
+  // printToPDF avoids browser/Cloudflare-Access variability and always names + writes
+  // a valid file (it waits for the logo image to finish loading first).
   if (/[?&]out=pdf/.test(slipUrl)) {
     return handleSlipSavePdf(slipUrl);
   }
@@ -342,6 +344,7 @@ function handleSlipPrint(slipUrl) {
 function handleSlipSavePdf(url) {
   const fs = require('fs');
   const path = require('path');
+  const os = require('os');
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -354,30 +357,42 @@ function handleSlipSavePdf(url) {
   win.webContents.on('dom-ready', () => {
     win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
   });
-  win.webContents.on('did-finish-load', () => {
-    setTimeout(() => {
-      win.webContents.printToPDF({
+  win.webContents.on('did-finish-load', async () => {
+    // Wait until images (the logo) actually finish loading before rendering. A fixed
+    // timeout could capture the page mid-render → a complete-but-corrupt PDF that
+    // readers like Edge refuse to open. Cap the wait at 4s as a safety net.
+    try {
+      await win.webContents.executeJavaScript(
+        'new Promise(function(res){var imgs=[].slice.call(document.images);' +
+        'var n=imgs.filter(function(i){return !i.complete}).length;' +
+        'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
+        'i.addEventListener("load",function(){if(--n<=0)res()});' +
+        'i.addEventListener("error",function(){if(--n<=0)res()});}});' +
+        'setTimeout(res,4000);})'
+      );
+    } catch (e) {}
+    try {
+      const data = await win.webContents.printToPDF({
         printBackground: true,
         pageSize:        'Letter',
         margins:         { marginType: 'default' },
-      }).then(async (data) => {
-        const defName = 'packing-slips-' + new Date().toISOString().slice(0, 10) + '.pdf';
-        const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-          title:       'Save Packing Slips as PDF',
-          defaultPath: path.join(app.getPath('downloads'), defName),
-          filters:     [{ name: 'PDF', extensions: ['pdf'] }],
-        });
-        if (!canceled && filePath) {
-          fs.writeFileSync(filePath, data);
-          if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: filePath });
-        }
-        win.destroy();
-      }).catch((err) => {
-        console.error('[fww-print] slip PDF save failed:', err);
-        if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(err) });
-        win.destroy();
       });
-    }, 500);
+      win.destroy();
+      const d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
+      const fname = 'packingslips-' + String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate())
+        + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.pdf';
+      const tmpPath = path.join(os.tmpdir(), fname);
+      fs.writeFileSync(tmpPath, data);
+      // Show the generated PDF in a browser-style window — Chromium's built-in PDF
+      // viewer, which has its own Save + Print controls. No save-folder prompt.
+      const viewer = new BrowserWindow({ width: 920, height: 1100, title: fname, autoHideMenuBar: true, webPreferences: { plugins: true } });
+      viewer.loadURL('file:///' + tmpPath.replace(/\\/g, '/'));
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: tmpPath });
+    } catch (err) {
+      console.error('[fww-print] slip PDF save failed:', err);
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(err) });
+      win.destroy();
+    }
   });
   win.loadURL(url);
 }
