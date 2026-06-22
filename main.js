@@ -336,7 +336,7 @@ function handleSlipPrint(slipUrl) {
     });
     return;
   }
-  silentPrintUrl(slipUrl, 'slip', settings);
+  printSlipViaPdf(slipUrl, settings);
 }
 
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
@@ -399,13 +399,61 @@ function handleSlipSavePdf(url) {
 
 // ─── Silent printing via hidden BrowserWindow ────────────────────────────────
 
-function silentPrintUrl(url, type, settings) {
-  const printerName = type === 'label' ? settings.labelPrinter : settings.slipPrinter;
-  const copies      = type === 'label' ? settings.labelCopies  : settings.slipCopies;
-  const isLabel     = type === 'label';
+// Auto-print packing slips. Instead of loading the slip page and racing its own
+// window.print() (which, in a hidden window, could open an invisible native
+// print dialog that hangs forever, or silently do nothing if the page was slow
+// to load), we use the SAME proven pipeline labels use: render the slip to a
+// PDF buffer first — waiting for the logo image to finish so the capture is a
+// valid, complete page — then silent-print that PDF to the slip printer.
+//
+// Every exit path is guarded: a hard timeout, a did-fail-load handler, and a
+// visible error dialog on genuine failure, so the operation can never just
+// "spin forever and go away" with no feedback.
+function printSlipViaPdf(url, settings) {
+  const SLIP_TIMEOUT_MS = 30000;
+  let renderWin = null;
+  let printWin  = null;
+  let settled   = false;
+
+  const finish = (success, reason) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(guard);
+    if (success) {
+      console.log(`[fww-print] slip printed to "${settings.slipPrinter}"`);
+    } else {
+      console.error(`[fww-print] slip print failed (${settings.slipPrinter}): ${reason}`);
+    }
+    if (mainWindow) {
+      mainWindow.webContents.send('print:status', {
+        type: 'slip', success, reason: reason || null, printer: settings.slipPrinter,
+      });
+    }
+    if (!success && mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'Packing Slip Did Not Print',
+        message: `The packing slip could not be printed to "${settings.slipPrinter}".`,
+        detail: String(reason || 'Unknown error') +
+          '\n\nCheck that the printer is online and selected in Print Settings, then try again.',
+        buttons: ['OK'],
+      }).catch(() => {});
+    }
+    // Tear down both hidden windows (give the spooler a moment first)
+    setTimeout(() => {
+      try { if (printWin)  printWin.destroy();  } catch (_) {}
+      try { if (renderWin) renderWin.destroy(); } catch (_) {}
+    }, 1500);
+  };
+
+  // Hard safety net so a slow/stuck slip page can never hang indefinitely.
+  const guard = setTimeout(
+    () => finish(false, `Timed out after ${SLIP_TIMEOUT_MS / 1000}s loading the packing slip`),
+    SLIP_TIMEOUT_MS
+  );
 
   // Inherit the same session so Cloudflare Access cookies apply
-  const printWin = new BrowserWindow({
+  renderWin = new BrowserWindow({
     show: false,
     webPreferences: {
       partition:        'persist:shipping',
@@ -414,76 +462,78 @@ function silentPrintUrl(url, type, settings) {
     },
   });
 
-  // For slip-render pages, override window.print() BEFORE the auto-fire
-  if (!isLabel) {
-    printWin.webContents.on('dom-ready', () => {
-      printWin.webContents.executeJavaScript(`
-        window.print = function() {
-          document.dispatchEvent(new CustomEvent('fww:ready-to-print'));
-        };
-      `).catch(() => {});
-    });
-  }
+  // Neutralize the page's own window.print() so it can't pop an invisible
+  // dialog in this hidden window — our printToPDF is the only render path.
+  renderWin.webContents.on('dom-ready', () => {
+    renderWin.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  });
 
-  const doPrint = () => {
-    const opts = {
-      silent:          true,
-      printBackground: true,
-      deviceName:      printerName,
-      copies:          copies || 1,
-    };
+  renderWin.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+    if (isMainFrame) finish(false, `Failed to load slip page: ${desc} (${code})`);
+  });
 
-    if (isLabel) {
-      opts.pageSize   = { width: settings.labelPaperWidth, height: settings.labelPaperHeight };
-      opts.margins    = { marginType: 'none' };
-      opts.landscape  = false;
-      opts.scaleFactor = 100;
-    } else {
-      opts.pageSize   = settings.slipPaperSize;  // e.g. 'Letter'
-      opts.margins    = { marginType: 'printableArea' };
-      opts.landscape  = false;
+  renderWin.webContents.on('did-finish-load', async () => {
+    // Wait until images (the logo) actually finish loading before rendering, so
+    // we don't capture the page mid-render. Cap the wait at 4s as a safety net.
+    try {
+      await renderWin.webContents.executeJavaScript(
+        'new Promise(function(res){var imgs=[].slice.call(document.images);' +
+        'var n=imgs.filter(function(i){return !i.complete}).length;' +
+        'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
+        'i.addEventListener("load",function(){if(--n<=0)res()});' +
+        'i.addEventListener("error",function(){if(--n<=0)res()});}});' +
+        'setTimeout(res,4000);})'
+      );
+    } catch (_) {}
+
+    let data;
+    try {
+      data = await renderWin.webContents.printToPDF({
+        printBackground: true,
+        pageSize:        settings.slipPaperSize || 'Letter',
+        margins:         { marginType: 'default' },
+      });
+    } catch (err) {
+      return finish(false, 'Could not render slip PDF: ' + err);
     }
 
-    printWin.webContents.print(opts, (success, reason) => {
-      if (!success) {
-        console.error(`[fww-print] ${type} print failed (${printerName}): ${reason}`);
-        if (mainWindow) {
-          mainWindow.webContents.send('print:status', {
-            type, success: false, reason, printer: printerName,
-          });
-        }
-      } else {
-        console.log(`[fww-print] ${type} printed to "${printerName}"`);
-        if (mainWindow) {
-          mainWindow.webContents.send('print:status', {
-            type, success: true, printer: printerName,
-          });
-        }
-      }
-      // Small delay before closing to ensure spooler receives the job
-      setTimeout(() => printWin.destroy(), 1500);
-    });
-  };
+    const tmpPath = path.join(os.tmpdir(), `fww-slip-${Date.now()}.pdf`);
+    try {
+      fs.writeFileSync(tmpPath, data);
+    } catch (err) {
+      return finish(false, 'Could not write slip PDF: ' + err);
+    }
 
-  if (isLabel) {
-    printWin.webContents.on('did-finish-load', doPrint);
-  } else {
-    // Wait for slip page to signal it's ready (our overridden window.print fires)
+    // Render window is done — free it now that we have the bytes.
+    try { renderWin.destroy(); } catch (_) {}
+    renderWin = null;
+
+    // Silent-print the rendered PDF to the slip printer.
+    printWin = new BrowserWindow({
+      show: false,
+      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
+    });
+    printWin.webContents.on('did-fail-load', () =>
+      finish(false, 'Could not open the rendered slip PDF for printing'));
     printWin.webContents.on('did-finish-load', () => {
-      // Fallback: if the CustomEvent approach doesn't fire, print after a delay
-      const fallbackTimer = setTimeout(doPrint, 600);
-      printWin.webContents.executeJavaScript(`
-        new Promise((resolve) => {
-          document.addEventListener('fww:ready-to-print', resolve, { once: true });
-        });
-      `).then(() => {
-        clearTimeout(fallbackTimer);
-        doPrint();
-      }).catch(() => {});
+      const opts = {
+        silent:          true,
+        printBackground: true,
+        deviceName:      settings.slipPrinter,
+        copies:          settings.slipCopies || 1,
+        pageSize:        settings.slipPaperSize || 'Letter',
+        margins:         { marginType: 'printableArea' },
+        landscape:       false,
+      };
+      printWin.webContents.print(opts, (success, reason) => {
+        fs.unlink(tmpPath, () => {});
+        finish(success, success ? null : reason);
+      });
     });
-  }
+    printWin.loadURL('file://' + tmpPath);
+  });
 
-  printWin.loadURL(url);
+  renderWin.loadURL(url);
 }
 
 function silentPrintPdfBuffer(buf, labelId, settings) {
