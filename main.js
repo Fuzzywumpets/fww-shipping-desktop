@@ -116,7 +116,7 @@ function buildAppMenu() {
     {
       label: 'Help',
       submenu: [
-        { label: 'Check for Updates', click: () => { try { autoUpdater.checkForUpdates(); } catch (_) {} } },
+        { label: 'Check for Updates', click: () => { try { checkForUpdatesInteractive(); } catch (_) {} } },
         { label: 'About', click: () => {
           dialog.showMessageBox(mainWindow, {
             type: 'info', title: 'FWW Shipping',
@@ -727,7 +727,7 @@ function updateTrayMenu() {
     { type: 'separator' },
     {
       label: 'Check for Updates',
-      click: () => autoUpdater.checkForUpdates(),
+      click: () => checkForUpdatesInteractive(),
     },
     { type: 'separator' },
     {
@@ -740,6 +740,26 @@ function updateTrayMenu() {
 
 // ─── Auto updater ─────────────────────────────────────────────────────────────
 
+// Set true when the user explicitly clicks "Check for Updates" so the OUTCOME
+// (already-current / error / now-downloading) is shown in a dialog. Without this
+// a manual check was completely silent on every outcome except a downloaded
+// update — so it looked like "checking for updates does nothing / never updates."
+// Automatic startup + 4-hour checks stay silent except the restart prompt.
+let _updateCheckInteractive = false;
+function checkForUpdatesInteractive() {
+  if (!app.isPackaged) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Check for Updates',
+      message: 'Auto-update only runs in the installed app.',
+      detail: 'This is a dev build (running from source), which does not self-update.',
+      buttons: ['OK'],
+    });
+    return;
+  }
+  _updateCheckInteractive = true;
+  autoUpdater.checkForUpdates().catch(() => {}); // failures surface via the 'error' handler
+}
+
 function setupAutoUpdater() {
   if (!app.isPackaged) return;  // skip in dev mode
 
@@ -751,10 +771,32 @@ function setupAutoUpdater() {
     mainWindow?.webContents.send('updater:status', {
       type: 'available', version: info.version,
     });
+    if (_updateCheckInteractive) {
+      _updateCheckInteractive = false;
+      dialog.showMessageBox(mainWindow, {
+        type: 'info', title: 'Update Available',
+        message: `Version ${info.version} is downloading…`,
+        detail: 'You will be prompted to restart once it has finished downloading.',
+        buttons: ['OK'],
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] no update available; on latest', app.getVersion());
+    if (_updateCheckInteractive) {
+      _updateCheckInteractive = false;
+      dialog.showMessageBox(mainWindow, {
+        type: 'info', title: 'No Updates',
+        message: `You're on the latest version (${app.getVersion()}).`,
+        buttons: ['OK'],
+      });
+    }
   });
 
   autoUpdater.on('update-downloaded', (info) => {
     console.log(`[updater] update downloaded: ${info.version}`);
+    _updateCheckInteractive = false;
     const choice = dialog.showMessageBoxSync(mainWindow, {
       type:    'info',
       title:   'Update Ready',
@@ -769,9 +811,20 @@ function setupAutoUpdater() {
     }
   });
 
-  autoUpdater.on('error', (e) => console.error('[updater] error:', e.message));
+  autoUpdater.on('error', (e) => {
+    console.error('[updater] error:', e?.message || e);
+    if (_updateCheckInteractive) {
+      _updateCheckInteractive = false;
+      dialog.showMessageBox(mainWindow, {
+        type: 'error', title: 'Update Check Failed',
+        message: 'Could not check for updates.',
+        detail: String(e?.message || e),
+        buttons: ['OK'],
+      });
+    }
+  });
 
-  // Check on startup, then every 4 hours
+  // Check on startup, then every 4 hours (silent unless an update downloads).
   autoUpdater.checkForUpdates().catch(() => {});
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
 }
