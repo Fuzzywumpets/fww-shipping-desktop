@@ -38,6 +38,14 @@ const store = new Store({
 
 // ─── Single instance lock ─────────────────────────────────────────────────────
 
+// SINGLE-INSTANCE LOCK: only one FWW Shipping process may run. A 2nd launch
+// loses the lock, exits immediately, and pokes the 1st instance via the
+// 'second-instance' handler (restore+focus). This pairs with window-all-closed
+// and the close handler both calling app.quit() so NO lingering background
+// process ever keeps the lock and blocks a reopen.
+// CHANGE-GUARD: if you touch quit/close logic, TEST: close the window, then
+// relaunch from the Start Menu — it must open a fresh window (not silently die
+// because a zombie process still holds the lock).
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); process.exit(0); }
 
@@ -51,6 +59,15 @@ let quitting          = false;   // true when user explicitly quits
 // After any hidden print window / viewer / print-manager window is torn down,
 // Windows can leave the main window without OS keyboard focus — so the next
 // barcode scan's keystrokes never reach the page. Restore focus defensively.
+// WHAT: re-assert OS keyboard focus on the main window + its webContents.
+// WHY IT EXISTS: tearing down a hidden print window / PDF viewer / print-manager
+// leaves the main window without OS focus on Windows, so the NEXT barcode scan's
+// keystrokes never reach the page and the scan silently no-ops.
+// INVARIANT: EVERY path that destroys a helper/hidden window must call this
+// afterward (see the calls in printSlip, silentPrintPdfBuffer, handleSlipSavePdf
+// catch, printManager 'closed'). Missing it = dead scanner after a print.
+// CHANGE-GUARD: after editing, TEST end-to-end on a real PC: auto-print a label,
+// then immediately scan another order with NOTHING clicked — the scan must register.
 function restoreMainFocus() {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -62,6 +79,13 @@ function restoreMainFocus() {
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
+// STARTUP ORDER is load-bearing: nativeTheme 'dark' is forced FIRST (the whole UI
+// is dark-mode), which is exactly why slip printing has to force light/white on the
+// hidden print page (see printSlip / handleSlipSavePdf). buildAppMenu reads settings
+// ONCE here and never rebuilds — see updateTrayMenu note about checkbox desync.
+// CHANGE-GUARD: reordering these can break first-paint or leave the tray/menu/
+// updater uninitialized. TEST: cold launch shows the dark UI, tray icon appears,
+// and Help > Check for Updates works.
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark';
   buildAppMenu();
@@ -72,6 +96,13 @@ app.whenReady().then(() => {
 
 // ─── Application menu (makes Print Settings discoverable in the menu bar) ──────
 
+// WHAT: builds the native menu bar (File / Printing / Edit / View / Help).
+// The Printing submenu's auto-print checkboxes are seeded from a ONE-TIME settings
+// snapshot taken here. This menu is built once at startup and never rebuilt.
+// CROSS-DEP / GOTCHA: toggling auto-print from the TRAY (updateTrayMenu) writes the
+// store but does NOT re-check these menu-bar boxes, so they go stale until restart.
+// CHANGE-GUARD: F12 DevTools, CmdOrCtrl+R reload, CmdOrCtrl+P open Print Settings,
+// CmdOrCtrl+Q quit — verify all still fire after any edit.
 function buildAppMenu() {
   const settings = store.get('printSettings');
   const menu = Menu.buildFromTemplate([
@@ -152,6 +183,12 @@ app.on('second-instance', () => {
 
 app.on('before-quit', () => { quitting = true; });
 
+// Closing the only window FULLY exits (no macOS-style background app). This is
+// intentional on Windows: a lingering process would keep the single-instance lock
+// and block the next launch. Do NOT add the usual `if (process.platform !== 'darwin')`
+// guard here unless you also rework the lock + tray-keepalive story.
+// CHANGE-GUARD: close the window, confirm the process is gone (Task Manager), then
+// relaunch — must open cleanly.
 app.on('window-all-closed', () => {
   // Closing the window fully exits the app — no lingering background instance
   // that would hold the single-instance lock and block reopening.
@@ -160,6 +197,15 @@ app.on('window-all-closed', () => {
 
 // ─── Main window ─────────────────────────────────────────────────────────────
 
+// WHAT: the single visible window that loads the live shipping UI (SHIPPING_URL).
+// CRITICAL INVARIANT — partition 'persist:shipping': this named session is where the
+// Cloudflare Access identity cookie lives. It MUST match the partition used by every
+// hidden print window (printSlip / handleSlipSavePdf) so those authenticated pages can
+// fetch slip-render content. Wiping it (reinstall / clearing app data) logs the user
+// out of CF Access -> Messages pane 401s (msgWhoami) and slip pages fail to load.
+// CHANGE-GUARD: if you rename/remove the partition, TEST: fresh load reaches the UI
+// WITHOUT a CF Access login prompt, Messages tab loads, and a slip prints with the
+// real logo (auth'd) — not a CF login page.
 function createMainWindow() {
   const bounds = store.get('windowBounds');
 
@@ -191,6 +237,11 @@ function createMainWindow() {
   // Closing the window quits the whole app — no lingering background instance.
   // Destroy any hidden print/helper windows first so nothing keeps the process
   // (and the single-instance lock) alive.
+// On close: set quitting, destroy EVERY non-main window (hidden print windows, PDF
+// viewers, print manager) so nothing keeps the process / single-instance lock alive,
+// then app.quit(). Hidden print windows can outlive a 'normal' close otherwise.
+// CHANGE-GUARD: kick off an auto-print, then close the main window mid-print — the
+// app must fully exit with no orphaned hidden windows lingering in the background.
   mainWindow.on('close', () => {
     quitting = true;
     BrowserWindow.getAllWindows().forEach((w) => {
@@ -202,6 +253,15 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 
   // Intercept new-window requests (slip-render pages, PDF downloads, etc.)
+// NEW-WINDOW ROUTER. Decides what happens when the page opens a new window/tab:
+//   - slip-render URLs  -> intercepted, printed/saved by handleSlipPrint, window DENIED
+//   - shipping / Google accounts / bridge URLs -> ALLOWED (these are real auth popups)
+//   - anything else -> opened in the system browser, window DENIED
+// INVARIANT: the slip-render branch MUST run before the allow-list, and the allow-list
+// MUST keep accounts.google.com + the bridge host or CF Access / Google login popups
+// get hijacked into the external browser and auth breaks.
+// CHANGE-GUARD: TEST printing a packing slip (slip window must NOT pop visibly) AND a
+// fresh CF Access / Google sign-in (popup must open IN-APP, not in Chrome).
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isSlipRenderUrl(url)) {
       handleSlipPrint(url);
@@ -230,6 +290,12 @@ function createMainWindow() {
     mainWindow.focus();
   });
 
+// did-finish-load re-injects BOTH the print interceptor and the floating settings
+// button on EVERY navigation (SPA route changes included). Both injectors are
+// idempotent via window.__fww* guards, so re-running is safe and required — a single
+// inject would be lost on reload/login redirect.
+// CHANGE-GUARD: reload the app (CmdOrCtrl+R); the 🖨 button must reappear and label
+// auto-print must still fire (the fetch patch must be re-applied).
   mainWindow.loadURL(SHIPPING_URL);
 }
 
@@ -238,6 +304,18 @@ function createMainWindow() {
 // Runs in the MAIN (page) world. Patches window.fetch to detect label PDF
 // responses and dispatches a CustomEvent that the preload catches.
 
+// WHAT: runs in the PAGE world; monkey-patches window.fetch to sniff label PDFs.
+// When a fetch to '/label' returns application/pdf, it reads x-label-id /
+// x-tracking-number headers, base64-encodes the body, and dispatches DOM event
+// 'fww:label-pdf' (preload forwards it to ipc 'print:label-pdf' -> silentPrintPdfBuffer).
+// INVARIANTS: (1) guarded by window.__fwwPrintInjected so a re-inject is a no-op.
+// (2) it reads res.CLONE().arrayBuffer() — never the original body — so the page's own
+// label download/preview still works. (3) base64 is built in 8KB chunks to avoid a
+// String.fromCharCode stack overflow on large PDFs.
+// CROSS-DEP: depends on the bridge worker setting content-type application/pdf AND the
+// x-label-id / x-tracking-number response headers on the /label route.
+// CHANGE-GUARD: buy a label and confirm it auto-prints; if you change the URL match or
+// headers, TEST that the PDF is still captured and the on-page label preview still opens.
 function injectPrintInterceptor(wc) {
   const code = `
 (function() {
@@ -251,6 +329,11 @@ function injectPrintInterceptor(wc) {
     try {
       const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
       const ct  = res.headers.get('content-type') || '';
+// MATCH CONTRACT: only fetches whose URL is exactly '/label' or ends in '/label' AND
+// whose response is application/pdf are captured. If the bridge ever serves labels from
+// a different path or as octet-stream, this silently stops auto-printing.
+// CHANGE-GUARD: after any bridge label-route change, buy a label and confirm the hidden
+// printer fires (check console for '[fww-print] label ... printed').
       if ((url === '/label' || url.endsWith('/label')) && ct.includes('application/pdf')) {
         const labelId   = res.headers.get('x-label-id') || 'unknown';
         const trackNum  = res.headers.get('x-tracking-number') || '';
@@ -290,6 +373,11 @@ function injectPrintInterceptor(wc) {
 }
 
 // Inject a floating "Print Settings" button into the shipping app
+// WHAT: injects the floating 🖨 'Print Settings' button (bottom-right) into the page.
+// Click dispatches DOM event 'fww:open-print-manager' -> preload -> ipc 'print:open-manager'
+// -> openPrintManager(). Guarded by window.__fwwPrintBtnInjected (idempotent re-inject).
+// CHANGE-GUARD: the 🖨 button must appear after every load AND clicking it must open the
+// Print Settings window (it's one of three entry points: button, menu, tray).
 function injectPrintButton(wc) {
   const code = `
 (function() {
@@ -318,15 +406,31 @@ function injectPrintButton(wc) {
 
 // ─── Slip print flow ──────────────────────────────────────────────────────────
 
+// WHAT: identifies packing-slip / pick-list render URLs so setWindowOpenHandler can
+// intercept and print them instead of opening a visible window.
+// CHANGE-GUARD: if the bridge's slip-render path changes, update this matcher or slip
+// printing/saving silently breaks (the window would open visibly instead).
 function isSlipRenderUrl(url) {
   return url.includes('/slip-render') || url.includes('slip-render');
 }
 
+// SLIP PRINT ROUTER. Three branches by URL/settings:
+//   1. ?out=pdf  -> handleSlipSavePdf (render to PDF + show in viewer; manual override)
+//   2. autoPrintSlips OFF -> open in default browser for manual print
+//   3. no slipPrinter set -> dialog offering Print Settings vs manual
+//   else -> printSlip (silent hidden-window print).
+// CHANGE-GUARD: TEST all 3 paths: (a) the 'Open as PDF' button, (b) auto-print off opens
+// the browser, (c) auto-print on with no printer set shows the config dialog.
 function handleSlipPrint(slipUrl) {
   // "Open as PDF" — render the slips to a PDF in an authenticated hidden window and
   // let the user save it (default name packingslips-YYMMDD-HHMMSS.pdf). Controlled
   // printToPDF avoids browser/Cloudflare-Access variability and always names + writes
   // a valid file (it waits for the logo image to finish loading first).
+// The 'Open as PDF' override is signalled purely by an out=pdf query param on the slip
+// URL (set by the UI button). If the UI stops appending it, slips silently go to the
+// printer instead of opening the save/preview viewer.
+// CHANGE-GUARD: click 'Open as PDF' and confirm a Chromium PDF viewer window opens
+// (named packingslips-YYMMDD-HHMMSS.pdf) rather than the slip going to the printer.
   if (/[?&]out=pdf/.test(slipUrl)) {
     return handleSlipSavePdf(slipUrl);
   }
@@ -353,6 +457,17 @@ function handleSlipPrint(slipUrl) {
 
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
 
+// WHAT: renders the slip page to a Letter PDF in a HIDDEN authenticated window, writes
+// it to a temp file, then shows it in a Chromium PDF viewer window (its own Save/Print).
+// WHY printToPDF (not browser print): deterministic naming + always writes a valid file,
+// avoiding CF-Access/browser variability. It WAITS for <img> (the logo) to finish — a
+// fixed timeout could snapshot mid-render and produce a complete-but-corrupt PDF that
+// Edge refuses to open; capped at 4s.
+// INVARIANT: uses partition 'persist:shipping' so the slip page is authenticated.
+// BUG-WATCH: there is NO did-fail-load handler and NO timeout here — if the page never
+// finishes loading, the hidden window leaks and focus is never restored (see bug report).
+// CHANGE-GUARD: 'Open as PDF' must produce a PDF that opens cleanly in Edge/Acrobat WITH
+// the FWW logo visible (not a blank/black page).
 function handleSlipSavePdf(url) {
   const fs = require('fs');
   const path = require('path');
@@ -424,7 +539,27 @@ function handleSlipSavePdf(url) {
 //   - a hard timeout, a did-fail-load handler, and a visible error dialog
 //   - we wait for the logo image to finish loading before printing
 //   - we force a light color scheme + white background as a dark-mode safety net
+// WHAT: silently auto-prints a packing slip by printing the slip-render HTML DIRECTLY
+// in a hidden window to settings.slipPrinter.
+// WHY direct HTML (not PDF): the app forces dark mode; reprinting a PDF via Chromium's
+// PDF viewer captures its dark canvas -> solid black page. Direct HTML uses @media print
+// emulation, which renders white. A light color-scheme + white-bg style is also injected
+// as a dark-mode safety net.
+// ROBUSTNESS (the GOOD template other print fns should copy): 30s hard timeout guard,
+// did-fail-load handler, a single-fire `settled` latch, neutralized page window.print(),
+// 4s image wait, visible error dialog on failure, and a 1.5s delay before destroy so the
+// spooler grabs the job — then restoreMainFocus().
+// INVARIANT: partition 'persist:shipping' (authenticated slip page).
+// CHANGE-GUARD: print a real multi-item slip — must come out WHITE with the logo, to the
+// configured slip printer; pull the printer offline and confirm the error dialog appears
+// (no infinite spin).
 function printSlip(url, settings) {
+// The `settled` latch + clearTimeout(guard) inside finish() guarantee EXACTLY-ONCE
+// completion: did-finish-load success, did-fail-load failure, and the timeout can race,
+// but only the first wins. Do not remove the latch — duplicate finishes would double-
+// report status and double-destroy the window.
+// CHANGE-GUARD: simulate a slow slip page (>30s) and confirm exactly one error dialog
+// and one window teardown.
   const SLIP_TIMEOUT_MS = 30000;
   let win     = null;
   let settled = false;
@@ -520,6 +655,17 @@ function printSlip(url, settings) {
   win.loadURL(url);
 }
 
+// WHAT: silently prints a LABEL PDF (already captured as a base64 buffer by the fetch
+// interceptor) to settings.labelPrinter in a hidden window. Label uses the 4x6 paper
+// size from settings (labelPaperWidth/Height in MICRONS) with marginType 'none' and
+// scaleFactor 100 so the label is not shrunk.
+// INVARIANT: writes a temp PDF, prints it, then fs.unlink's it in the print callback;
+// restoreMainFocus() runs 1.5s after the job so the scanner keeps working.
+// BUG-WATCH: unlike printSlip there is NO timeout and NO did-fail-load handler here — if
+// did-finish-load never fires (corrupt/empty PDF), the temp file + hidden window LEAK,
+// focus is never restored, and the failure is never reported (see bug report).
+// CHANGE-GUARD: buy a label and confirm it prints at correct 4x6 size (not shrunk/rotated)
+// to the label printer, and that a 2nd scan still registers afterward.
 function silentPrintPdfBuffer(buf, labelId, settings) {
   const tmpPath = path.join(os.tmpdir(), `fww-label-${labelId}-${Date.now()}.pdf`);
   try {
@@ -572,6 +718,11 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 
 // Label PDF received from page (base64-encoded)
+// IPC ENTRY for label auto-print. Fired by preload when the page dispatches
+// 'fww:label-pdf' (from the fetch interceptor). Honors autoPrintLabels; if no
+// labelPrinter is configured it reports failure AND pops Print Settings.
+// CHANGE-GUARD: with auto-print OFF a bought label must NOT print; with it ON and a
+// printer set, it must; with it ON and NO printer set, Print Settings must open.
 ipcMain.on('print:label-pdf', (event, { labelId, data }) => {
   const settings = store.get('printSettings');
   if (!settings.autoPrintLabels) {
@@ -585,20 +736,28 @@ ipcMain.on('print:label-pdf', (event, { labelId, data }) => {
     openPrintManager();
     return;
   }
+// `data` is the base64 the interceptor built in 8KB chunks. This must round-trip the
+// raw PDF bytes exactly — if the interceptor's chunking/encoding is changed, a corrupt
+// buffer prints blank or fails silently.
+// CHANGE-GUARD: after any interceptor edit, diff a printed label against the on-screen
+// preview — barcode must scan.
   const buf = Buffer.from(data, 'base64');
   silentPrintPdfBuffer(buf, labelId, settings);
 });
 
 // Slip print triggered from page
 ipcMain.on('print:slip-url', (event, { url }) => {
-  const settings = store.get('printSettings');
-  handleSlipPrint(url);
+  handleSlipPrint(url); // (removed an unused store.get(printSettings) read; handleSlipPrint re-reads it)
 });
 
 // Open print manager window
 ipcMain.on('print:open-manager', () => openPrintManager());
 
 // Get available printers
+// Returns the OS printer list via the MAIN window's webContents (getPrintersAsync needs
+// a live webContents). Returns [] if mainWindow is gone or the call throws.
+// CHANGE-GUARD: open Print Settings and confirm the label/slip printer dropdowns are
+// populated with real OS printers.
 ipcMain.handle('printers:list', async () => {
   if (!mainWindow) return [];
   try {
@@ -618,6 +777,12 @@ ipcMain.handle('settings:set', (event, newSettings) => {
 });
 
 // Test print
+// WHAT: 'Test Print' for label/slip from Print Settings — renders a self-contained test
+// HTML (buildTestLabelHtml / buildTestSlipHtml) and prints it with the SAME paper/margin
+// options the real printers use (4x6 microns + no margins for labels; slipPaperSize +
+// printableArea for slips). This validates printer + paper config without a real order.
+// CHANGE-GUARD: if you change real-print options in printSlip/silentPrintPdfBuffer, mirror
+// them here or 'Test Print OK' will lie about real-world output.
 ipcMain.handle('print:test', async (event, { type }) => {
   const settings = store.get('printSettings');
   const printerName = type === 'label' ? settings.labelPrinter : settings.slipPrinter;
@@ -661,6 +826,12 @@ ipcMain.handle('app:version', () => app.getVersion());
 
 // ─── Print manager window ─────────────────────────────────────────────────────
 
+// WHAT: opens (or focuses, if already open) the Print Settings window (print-manager.html).
+// Singleton guarded by printManagerWindow + isDestroyed(). Uses the SAME preload, which
+// exposes printManagerAPI only on file:// pages. On close it restoreMainFocus() so the
+// scanner survives.
+// CHANGE-GUARD: open Print Settings twice — second click must focus the existing window,
+// not spawn a duplicate; after closing it, a scan must still register.
 function openPrintManager() {
   if (printManagerWindow && !printManagerWindow.isDestroyed()) {
     printManagerWindow.focus();
@@ -691,6 +862,11 @@ function openPrintManager() {
 
 // ─── System tray ─────────────────────────────────────────────────────────────
 
+// WHAT: system tray icon + tooltip; double-click re-shows/focuses the main window.
+// Right-click menu is built by updateTrayMenu. The tray is a secondary entry point and a
+// keepalive surface — do not remove it without revisiting window-all-closed quit logic.
+// CHANGE-GUARD: minimize/close to tray scenario — double-click tray must restore the
+// window and the right-click menu must work.
 function createTray() {
   const img = nativeImage.createFromPath(ICON_PATH).resize({ width: 16, height: 16 });
   tray = new Tray(img);
@@ -704,6 +880,13 @@ function createTray() {
   });
 }
 
+// WHAT: (re)builds the tray right-click menu with LIVE auto-print ON/OFF labels read from
+// the store each call. Toggling here writes the store and rebuilds the tray.
+// GOTCHA / CROSS-DEP: this does NOT refresh the menu-bar checkboxes in buildAppMenu (built
+// once at startup), so the two surfaces can show different states until restart. The store
+// is the single source of truth; the menu-bar boxes are the stale ones.
+// CHANGE-GUARD: toggle Auto-print from the tray, then buy a label — behavior must follow
+// the NEW setting (store), regardless of what the menu-bar checkbox shows.
 function updateTrayMenu() {
   const settings = store.get('printSettings');
   const menu = Menu.buildFromTemplate([
@@ -758,7 +941,19 @@ function updateTrayMenu() {
 // a manual check was completely silent on every outcome except a downloaded
 // update — so it looked like "checking for updates does nothing / never updates."
 // Automatic startup + 4-hour checks stay silent except the restart prompt.
+// FLAG: true only while a USER-initiated 'Check for Updates' is in flight, so the OUTCOME
+// (up-to-date / error / now-downloading) is shown in a dialog. Without it, a manual check
+// was silent on every outcome except a downloaded update — looked like 'updates do nothing'.
+// Each autoUpdater handler resets it to false after consuming it (one-shot).
+// CHANGE-GUARD: Help > Check for Updates on the LATEST version must show a 'you're on the
+// latest' dialog; automatic startup/4h checks must stay silent (no nag dialogs).
 let _updateCheckInteractive = false;
+// WHAT: user-triggered update check (menu + tray). In a dev/unpackaged build it just
+// explains auto-update only runs in the installed app and returns. In the packaged app it
+// sets _updateCheckInteractive and kicks autoUpdater.checkForUpdates(); errors surface via
+// the 'error' handler (hence the empty .catch).
+// CHANGE-GUARD: run from source -> 'dev build' dialog; run installed -> a real check with a
+// visible outcome dialog.
 function checkForUpdatesInteractive() {
   if (!app.isPackaged) {
     dialog.showMessageBox(mainWindow, {
@@ -773,7 +968,19 @@ function checkForUpdatesInteractive() {
   autoUpdater.checkForUpdates().catch(() => {}); // failures surface via the 'error' handler
 }
 
+// WHAT: electron-updater wiring for the per-user installed app (public GitHub releases).
+// autoDownload + autoInstallOnAppQuit are ON. Handlers: update-available (download starts),
+// update-not-available, update-downloaded (prompt Restart Now / Later), error.
+// INVARIANT: only ever runs in the packaged app (early return when !app.isPackaged) — dev
+// builds never self-update. 'update-downloaded' sets quitting=true before quitAndInstall so
+// the close/quit guards don't fight the relaunch.
+// CHANGE-GUARD: publish a bump and confirm: silent auto-download, the Restart prompt, and a
+// successful relaunch into the new version. Verify dev builds still skip all of this.
 function setupAutoUpdater() {
+// HARD GATE: never arm the updater in a dev/source run — electron-updater has no valid
+// install metadata there and would error on every check. Do not remove this guard.
+// CHANGE-GUARD: launch from source and confirm NO update errors are logged and no 4h
+// interval is created.
   if (!app.isPackaged) return;  // skip in dev mode
 
   autoUpdater.autoDownload        = true;
@@ -807,6 +1014,12 @@ function setupAutoUpdater() {
     }
   });
 
+// Prompts Restart Now / Later via a SYNC dialog. 'Restart Now' sets quitting=true THEN
+// quitAndInstall() — the quitting flag is required so the window close/quit handlers treat
+// this as an intentional quit and don't interfere with the installer relaunch. 'Later'
+// defers to autoInstallOnAppQuit.
+// CHANGE-GUARD: choosing 'Restart Now' must relaunch into the new version; 'Later' must
+// keep running and apply the update on next manual quit.
   autoUpdater.on('update-downloaded', (info) => {
     console.log(`[updater] update downloaded: ${info.version}`);
     _updateCheckInteractive = false;
@@ -839,11 +1052,18 @@ function setupAutoUpdater() {
 
   // Check on startup, then every 4 hours (silent unless an update downloads).
   autoUpdater.checkForUpdates().catch(() => {});
+// Background poll: check on startup, then every 4h. SILENT by design (no dialog) unless an
+// update actually downloads — _updateCheckInteractive stays false here so only the Restart
+// prompt ever interrupts the user. The interval is never cleared (lives for app lifetime).
+// CHANGE-GUARD: confirm background checks never pop 'no updates' nag dialogs.
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
 }
 
 // ─── Test print content ───────────────────────────────────────────────────────
 
+// Self-contained 4x6 test-label HTML (no network/auth). @page size 4in 6in must stay in
+// sync with the real label paper dimensions so a passing test reflects real output.
+// CHANGE-GUARD: 'Test Print' on the label printer must produce a correctly-sized 4x6 page.
 function buildTestLabelHtml() {
   return `<!doctype html><html><head><meta charset=utf-8>
 <style>
@@ -864,6 +1084,9 @@ p{margin:4px 0;font-size:11pt;color:#444}
 </body></html>`;
 }
 
+// Self-contained Letter test-slip HTML. White background is deliberate — it proves the
+// slip printer renders light (the real slip path also forces light to beat dark mode).
+// CHANGE-GUARD: 'Test Print' on the slip printer must come out WHITE on Letter, not dark.
 function buildTestSlipHtml() {
   return `<!doctype html><html><head><meta charset=utf-8>
 <style>
