@@ -336,7 +336,7 @@ function handleSlipPrint(slipUrl) {
     });
     return;
   }
-  printSlipViaPdf(slipUrl, settings);
+  printSlip(slipUrl, settings);
 }
 
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
@@ -399,21 +399,22 @@ function handleSlipSavePdf(url) {
 
 // ─── Silent printing via hidden BrowserWindow ────────────────────────────────
 
-// Auto-print packing slips. Instead of loading the slip page and racing its own
-// window.print() (which, in a hidden window, could open an invisible native
-// print dialog that hangs forever, or silently do nothing if the page was slow
-// to load), we use the SAME proven pipeline labels use: render the slip to a
-// PDF buffer first — waiting for the logo image to finish so the capture is a
-// valid, complete page — then silent-print that PDF to the slip printer.
+// Auto-print packing slips by printing the slip-render HTML page DIRECTLY in a
+// hidden window. We deliberately do NOT render to an intermediate PDF and then
+// reprint it: the app forces dark mode (nativeTheme 'dark'), and printing a PDF
+// through Chromium's built-in PDF viewer captures that viewer's dark/black
+// canvas with printBackground -> a solid black page. Printing the HTML directly
+// uses print emulation (@media print), which the slip page renders white.
 //
-// Every exit path is guarded: a hard timeout, a did-fail-load handler, and a
-// visible error dialog on genuine failure, so the operation can never just
-// "spin forever and go away" with no feedback.
-function printSlipViaPdf(url, settings) {
+// We keep robust guards so this can never just "spin forever and go away":
+//   - the page's own window.print() is neutralized (we drive the print)
+//   - a hard timeout, a did-fail-load handler, and a visible error dialog
+//   - we wait for the logo image to finish loading before printing
+//   - we force a light color scheme + white background as a dark-mode safety net
+function printSlip(url, settings) {
   const SLIP_TIMEOUT_MS = 30000;
-  let renderWin = null;
-  let printWin  = null;
-  let settled   = false;
+  let win     = null;
+  let settled = false;
 
   const finish = (success, reason) => {
     if (settled) return;
@@ -439,11 +440,8 @@ function printSlipViaPdf(url, settings) {
         buttons: ['OK'],
       }).catch(() => {});
     }
-    // Tear down both hidden windows (give the spooler a moment first)
-    setTimeout(() => {
-      try { if (printWin)  printWin.destroy();  } catch (_) {}
-      try { if (renderWin) renderWin.destroy(); } catch (_) {}
-    }, 1500);
+    // Give the spooler a moment to pick up the job before tearing the window down.
+    setTimeout(() => { try { if (win) win.destroy(); } catch (_) {} }, 1500);
   };
 
   // Hard safety net so a slow/stuck slip page can never hang indefinitely.
@@ -452,9 +450,11 @@ function printSlipViaPdf(url, settings) {
     SLIP_TIMEOUT_MS
   );
 
-  // Inherit the same session so Cloudflare Access cookies apply
-  renderWin = new BrowserWindow({
+  // Inherit the same session so Cloudflare Access cookies apply. White window
+  // background so nothing dark ever shows through.
+  win = new BrowserWindow({
     show: false,
+    backgroundColor: '#ffffff',
     webPreferences: {
       partition:        'persist:shipping',
       contextIsolation: true,
@@ -462,21 +462,25 @@ function printSlipViaPdf(url, settings) {
     },
   });
 
-  // Neutralize the page's own window.print() so it can't pop an invisible
-  // dialog in this hidden window — our printToPDF is the only render path.
-  renderWin.webContents.on('dom-ready', () => {
-    renderWin.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  // Neutralize the page's own window.print() so it can't fire an unmanaged
+  // print (or hang) — we drive printing ourselves once the page is ready.
+  win.webContents.on('dom-ready', () => {
+    win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
   });
 
-  renderWin.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+  win.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
     if (isMainFrame) finish(false, `Failed to load slip page: ${desc} (${code})`);
   });
 
-  renderWin.webContents.on('did-finish-load', async () => {
-    // Wait until images (the logo) actually finish loading before rendering, so
-    // we don't capture the page mid-render. Cap the wait at 4s as a safety net.
+  win.webContents.on('did-finish-load', async () => {
+    // Force a light color scheme + white background (the app runs in forced dark
+    // mode), then wait for images (the logo) to finish so nothing prints
+    // half-loaded. Cap the image wait at 4s as a safety net.
     try {
-      await renderWin.webContents.executeJavaScript(
+      await win.webContents.executeJavaScript(
+        '(function(){try{var s=document.createElement("style");' +
+        's.textContent=":root{color-scheme:light!important}html,body{background:#fff!important}";' +
+        '(document.head||document.documentElement).appendChild(s);}catch(e){}})();' +
         'new Promise(function(res){var imgs=[].slice.call(document.images);' +
         'var n=imgs.filter(function(i){return !i.complete}).length;' +
         'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
@@ -486,54 +490,21 @@ function printSlipViaPdf(url, settings) {
       );
     } catch (_) {}
 
-    let data;
-    try {
-      data = await renderWin.webContents.printToPDF({
-        printBackground: true,
-        pageSize:        settings.slipPaperSize || 'Letter',
-        margins:         { marginType: 'default' },
-      });
-    } catch (err) {
-      return finish(false, 'Could not render slip PDF: ' + err);
-    }
-
-    const tmpPath = path.join(os.tmpdir(), `fww-slip-${Date.now()}.pdf`);
-    try {
-      fs.writeFileSync(tmpPath, data);
-    } catch (err) {
-      return finish(false, 'Could not write slip PDF: ' + err);
-    }
-
-    // Render window is done — free it now that we have the bytes.
-    try { renderWin.destroy(); } catch (_) {}
-    renderWin = null;
-
-    // Silent-print the rendered PDF to the slip printer.
-    printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
+    const opts = {
+      silent:          true,
+      printBackground: true,
+      deviceName:      settings.slipPrinter,
+      copies:          settings.slipCopies || 1,
+      pageSize:        settings.slipPaperSize || 'Letter',
+      margins:         { marginType: 'printableArea' },
+      landscape:       false,
+    };
+    win.webContents.print(opts, (success, reason) => {
+      finish(success, success ? null : reason);
     });
-    printWin.webContents.on('did-fail-load', () =>
-      finish(false, 'Could not open the rendered slip PDF for printing'));
-    printWin.webContents.on('did-finish-load', () => {
-      const opts = {
-        silent:          true,
-        printBackground: true,
-        deviceName:      settings.slipPrinter,
-        copies:          settings.slipCopies || 1,
-        pageSize:        settings.slipPaperSize || 'Letter',
-        margins:         { marginType: 'printableArea' },
-        landscape:       false,
-      };
-      printWin.webContents.print(opts, (success, reason) => {
-        fs.unlink(tmpPath, () => {});
-        finish(success, success ? null : reason);
-      });
-    });
-    printWin.loadURL('file://' + tmpPath);
   });
 
-  renderWin.loadURL(url);
+  win.loadURL(url);
 }
 
 function silentPrintPdfBuffer(buf, labelId, settings) {
