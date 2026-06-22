@@ -48,6 +48,18 @@ let printManagerWindow = null;
 let tray              = null;
 let quitting          = false;   // true when user explicitly quits
 
+// After any hidden print window / viewer / print-manager window is torn down,
+// Windows can leave the main window without OS keyboard focus — so the next
+// barcode scan's keystrokes never reach the page. Restore focus defensively.
+function restoreMainFocus() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.focus();
+      mainWindow.webContents.focus();
+    }
+  } catch (_) {}
+}
+
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -392,6 +404,7 @@ function handleSlipSavePdf(url) {
       console.error('[fww-print] slip PDF save failed:', err);
       if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(err) });
       win.destroy();
+      restoreMainFocus();
     }
   });
   win.loadURL(url);
@@ -441,7 +454,7 @@ function printSlip(url, settings) {
       }).catch(() => {});
     }
     // Give the spooler a moment to pick up the job before tearing the window down.
-    setTimeout(() => { try { if (win) win.destroy(); } catch (_) {} }, 1500);
+    setTimeout(() => { try { if (win) win.destroy(); } catch (_) {} restoreMainFocus(); }, 1500);
   };
 
   // Hard safety net so a slow/stuck slip page can never hang indefinitely.
@@ -549,7 +562,7 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
           type: 'label', success: true, labelId, printer: settings.labelPrinter,
         });
       }
-      setTimeout(() => printWin.destroy(), 1500);
+      setTimeout(() => { printWin.destroy(); restoreMainFocus(); }, 1500);
     });
   });
 
@@ -672,7 +685,7 @@ function openPrintManager() {
     },
   });
   printManagerWindow.once('ready-to-show', () => printManagerWindow.show());
-  printManagerWindow.on('closed', () => { printManagerWindow = null; });
+  printManagerWindow.on('closed', () => { printManagerWindow = null; restoreMainFocus(); });
   printManagerWindow.loadFile(path.join(__dirname, 'print-manager.html'));
 }
 
