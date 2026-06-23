@@ -472,7 +472,34 @@ function handleSlipSavePdf(url) {
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
-  const win = new BrowserWindow({
+  // ROBUSTNESS (mirrors printSlip): a single-fire `settled` latch + a 30s hard
+  // timeout guard + a did-fail-load handler. did-finish-load is NOT guaranteed to
+  // fire (CF Access redirect / network error) — without these the hidden window
+  // leaks and focus is never restored. SUCCESS intentionally hands focus to the
+  // visible viewer, so finish(true) does NOT destroy the hidden win or restore
+  // focus; only the failure path tears the hidden window down + restoreMainFocus().
+  const SLIP_PDF_TIMEOUT_MS = 30000;
+  let win     = null;
+  let settled = false;
+
+  const finish = (success, reason) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(guard);
+    if (success) return; // success path destroys the hidden win itself + keeps viewer focus
+    console.error('[fww-print] slip PDF save failed:', reason);
+    if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(reason) });
+    try { if (win) win.destroy(); } catch (_) {}
+    restoreMainFocus();
+  };
+
+  // Hard safety net so a slow/stuck slip page can never hang indefinitely.
+  const guard = setTimeout(
+    () => finish(false, `Timed out after ${SLIP_PDF_TIMEOUT_MS / 1000}s loading the packing slip`),
+    SLIP_PDF_TIMEOUT_MS
+  );
+
+  win = new BrowserWindow({
     show: false,
     webPreferences: {
       partition:        'persist:shipping',
@@ -483,6 +510,9 @@ function handleSlipSavePdf(url) {
   // Neutralize the page's own window.print() so only our printToPDF runs.
   win.webContents.on('dom-ready', () => {
     win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  });
+  win.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+    if (isMainFrame) finish(false, `Failed to load slip page: ${desc} (${code})`);
   });
   win.webContents.on('did-finish-load', async () => {
     // Wait until images (the logo) actually finish loading before rendering. A fixed
@@ -504,6 +534,7 @@ function handleSlipSavePdf(url) {
         pageSize:        'Letter',
         margins:         { marginType: 'default' },
       });
+      finish(true); // latch + clear the timeout guard so a late fail/timeout can't fire
       win.destroy();
       const d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
       const fname = 'packingslips-' + String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate())
@@ -516,10 +547,7 @@ function handleSlipSavePdf(url) {
       viewer.loadURL('file:///' + tmpPath.replace(/\\/g, '/'));
       if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: tmpPath });
     } catch (err) {
-      console.error('[fww-print] slip PDF save failed:', err);
-      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(err) });
-      win.destroy();
-      restoreMainFocus();
+      finish(false, err); // destroys the hidden win once + restoreMainFocus() + sends failure status
     }
   });
   win.loadURL(url);
@@ -675,6 +703,35 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
     return;
   }
 
+  // ROBUSTNESS (mirrors printSlip): single-fire `settled` latch + 30s hard timeout
+  // guard + did-fail-load handler. did-finish-load is NOT guaranteed to fire for a
+  // corrupt/empty PDF or a load error — without these the temp file + hidden window
+  // LEAK, focus is never restored, and the failure is never reported.
+  const LABEL_TIMEOUT_MS = 30000;
+  let settled = false;
+
+  const cleanup = () => {
+    fs.unlink(tmpPath, () => {});
+    try { printWin.destroy(); } catch (_) {}
+    restoreMainFocus();
+  };
+  const fail = (reason) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(guard);
+    console.error(`[fww-print] label print failed: ${reason}`);
+    mainWindow?.webContents.send('print:status', {
+      type: 'label', success: false, reason: String(reason), printer: settings.labelPrinter,
+    });
+    cleanup();
+  };
+
+  // Hard safety net so a stuck/corrupt label PDF can never hang indefinitely.
+  const guard = setTimeout(
+    () => fail(`Timed out after ${LABEL_TIMEOUT_MS / 1000}s loading the label PDF`),
+    LABEL_TIMEOUT_MS
+  );
+
   const printWin = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -684,7 +741,15 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
     },
   });
 
+  printWin.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+    if (isMainFrame) fail(`Failed to load label PDF: ${desc} (${code})`);
+  });
+
   printWin.webContents.on('did-finish-load', () => {
+    // Latch so the 30s guard / did-fail-load can't fire after we begin printing.
+    if (settled) return;
+    settled = true;
+    clearTimeout(guard);
     const opts = {
       silent:          true,
       printBackground: true,
