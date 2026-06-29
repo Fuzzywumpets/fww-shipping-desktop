@@ -551,6 +551,7 @@ function handleLabelSavePdf(url) {
       console.error('[fww-print] label PDF save failed:', err);
       if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: false, reason: String(err) });
       win.destroy();
+      restoreMainFocus();
     }
   });
   win.loadURL(url);
@@ -598,6 +599,9 @@ function printLabelViaPdf(url, settings) {
     setTimeout(() => {
       try { if (printWin)  printWin.destroy();  } catch (_) {}
       try { if (renderWin) renderWin.destroy(); } catch (_) {}
+      // INVARIANT: every hidden-window teardown must restore focus or the next
+      // barcode scan's keystrokes never reach the page (dead scanner after print).
+      restoreMainFocus();
     }, 1500);
   };
 
