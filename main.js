@@ -267,6 +267,14 @@ function createMainWindow() {
       handleSlipPrint(url);
       return { action: 'deny' };
     }
+    // Label / batch-label print-views: the UI opens these expecting the desktop
+    // shell to silent-print them, exactly like packing slips (see sendToPrinter in
+    // ui.html). Without this branch the window just opens visibly and "the label
+    // opens as a PDF" instead of spooling to the Rollo.
+    if (isLabelPrintViewUrl(url)) {
+      handleLabelPrint(url);
+      return { action: 'deny' };
+    }
     if (url.startsWith('https://shipping.fuzzyreporting.com') ||
         url.startsWith('https://accounts.google.com') ||
         url.startsWith('https://fww-shipping-bridge.')) {
@@ -453,6 +461,234 @@ function handleSlipPrint(slipUrl) {
     return;
   }
   printSlip(slipUrl, settings);
+}
+
+// ─── Label print flow ─────────────────────────────────────────────────────────
+//
+// The shipping UI prints labels the SAME way it prints packing slips: it opens an
+// HTML auto-print page (/label/print-view?label_id=… for a single buy,
+// /batch/print-view?batch_id=… for a batch) in a new window and relies on the
+// desktop shell to capture it and silent-print. A raw PDF window can't be auto-
+// printed by Electron; an HTML print-view can. This mirrors handleSlipPrint but
+// routes to the LABEL printer (Rollo) at 4×6.
+
+function isLabelPrintViewUrl(url) {
+  return url.includes('/label/print-view') || url.includes('/batch/print-view');
+}
+
+function handleLabelPrint(labelUrl) {
+  // "Open as PDF" toggle (output dropdown) — render to a saved PDF instead of
+  // spooling, matching the slip out=pdf path.
+  if (/[?&]out=pdf/.test(labelUrl)) {
+    return handleLabelSavePdf(labelUrl);
+  }
+  const settings = store.get('printSettings');
+  if (!settings.autoPrintLabels) {
+    // Auto-print off: open in default browser so the user can print manually
+    shell.openExternal(labelUrl);
+    return;
+  }
+  if (!settings.labelPrinter) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'No Label Printer Configured',
+      message: 'Please configure your shipping label printer (e.g. Rollo) in Print Settings before printing.',
+      buttons: ['Open Print Settings', 'Print Manually'],
+    }).then(({ response }) => {
+      if (response === 0) openPrintManager();
+      else shell.openExternal(labelUrl);
+    });
+    return;
+  }
+  printLabelViaPdf(labelUrl, settings);
+}
+
+// ─── Save batch/label print-view to a PDF (manual override) ──────────────────
+
+function handleLabelSavePdf(url) {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      partition:        'persist:shipping',
+      contextIsolation: true,
+      nodeIntegration:  false,
+    },
+  });
+  // Neutralize the page's own window.print() so only our printToPDF runs.
+  win.webContents.on('dom-ready', () => {
+    win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  });
+  win.webContents.on('did-finish-load', async () => {
+    // Wait for the label images to finish loading before rendering. A batch can be
+    // dozens of remote PNGs, so cap high (140s) rather than save a blank-page PDF.
+    try {
+      await win.webContents.executeJavaScript(
+        'new Promise(function(res){var imgs=[].slice.call(document.images);' +
+        'var n=imgs.filter(function(i){return !i.complete}).length;' +
+        'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
+        'i.addEventListener("load",function(){if(--n<=0)res()});' +
+        'i.addEventListener("error",function(){if(--n<=0)res()});}});' +
+        'setTimeout(res,140000);})'
+      );
+    } catch (e) {}
+    const settings = store.get('printSettings');
+    try {
+      const data = await win.webContents.printToPDF({
+        printBackground: true,
+        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+        margins:         { marginType: 'none' },
+      });
+      win.destroy();
+      const d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
+      const fname = 'labels-' + String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate())
+        + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.pdf';
+      const tmpPath = path.join(os.tmpdir(), fname);
+      fs.writeFileSync(tmpPath, data);
+      const viewer = new BrowserWindow({ width: 560, height: 900, title: fname, autoHideMenuBar: true, webPreferences: { plugins: true } });
+      viewer.loadURL('file:///' + tmpPath.replace(/\\/g, '/'));
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: true, path: tmpPath });
+    } catch (err) {
+      console.error('[fww-print] label PDF save failed:', err);
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: false, reason: String(err) });
+      win.destroy();
+    }
+  });
+  win.loadURL(url);
+}
+
+// Auto-print a label print-view page. Same proven pipeline the slips use: render
+// the print-view HTML to a PDF buffer first (waiting for the label PNGs to load so
+// the capture is complete), then silent-print that PDF to the LABEL printer at
+// 4×6. Every exit path is guarded (hard timeout, did-fail-load, error dialog) so
+// it can never spin forever with no feedback. Mirrors printSlipViaPdf.
+function printLabelViaPdf(url, settings) {
+  // A single label loads one PNG, but /batch/print-view can pull DOZENS of remote
+  // ShipStation PNG URLs — a 25-label batch can legitimately take a minute-plus to
+  // fully load. Keep the budget generous so a slow batch spools complete instead of
+  // capturing blank pages. (The real speed fix is server-side: serve a merged PDF.)
+  const LABEL_TIMEOUT_MS = 150000;
+  let renderWin = null;
+  let printWin  = null;
+  let settled   = false;
+
+  const finish = (success, reason) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(guard);
+    if (success) {
+      console.log(`[fww-print] label printed to "${settings.labelPrinter}"`);
+    } else {
+      console.error(`[fww-print] label print failed (${settings.labelPrinter}): ${reason}`);
+    }
+    if (mainWindow) {
+      mainWindow.webContents.send('print:status', {
+        type: 'label', success, reason: reason || null, printer: settings.labelPrinter,
+      });
+    }
+    if (!success && mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'Label Did Not Print',
+        message: `The shipping label could not be printed to "${settings.labelPrinter}".`,
+        detail: String(reason || 'Unknown error') +
+          '\n\nCheck that the printer is online and selected in Print Settings, then try again.',
+        buttons: ['OK'],
+      }).catch(() => {});
+    }
+    setTimeout(() => {
+      try { if (printWin)  printWin.destroy();  } catch (_) {}
+      try { if (renderWin) renderWin.destroy(); } catch (_) {}
+    }, 1500);
+  };
+
+  const guard = setTimeout(
+    () => finish(false, `Timed out after ${LABEL_TIMEOUT_MS / 1000}s loading the label`),
+    LABEL_TIMEOUT_MS
+  );
+
+  // Inherit the shipping session so Cloudflare Access cookies apply.
+  renderWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      partition:        'persist:shipping',
+      contextIsolation: true,
+      nodeIntegration:  false,
+    },
+  });
+
+  // Neutralize the page's own window.print() so it can't pop an invisible dialog
+  // in this hidden window — our printToPDF is the only render path.
+  renderWin.webContents.on('dom-ready', () => {
+    renderWin.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  });
+
+  renderWin.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+    if (isMainFrame) finish(false, `Failed to load label page: ${desc} (${code})`);
+  });
+
+  renderWin.webContents.on('did-finish-load', async () => {
+    // Wait until the label PNG(s) finish loading before rendering so we don't
+    // capture the page mid-render. A batch can be dozens of remote PNGs, so cap
+    // the wait high (140s) — far better to wait than to spool blank labels.
+    try {
+      await renderWin.webContents.executeJavaScript(
+        'new Promise(function(res){var imgs=[].slice.call(document.images);' +
+        'var n=imgs.filter(function(i){return !i.complete}).length;' +
+        'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
+        'i.addEventListener("load",function(){if(--n<=0)res()});' +
+        'i.addEventListener("error",function(){if(--n<=0)res()});}});' +
+        'setTimeout(res,140000);})'
+      );
+    } catch (_) {}
+
+    let data;
+    try {
+      data = await renderWin.webContents.printToPDF({
+        printBackground: true,
+        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+        margins:         { marginType: 'none' },
+      });
+    } catch (err) {
+      return finish(false, 'Could not render label PDF: ' + err);
+    }
+
+    const tmpPath = path.join(os.tmpdir(), `fww-label-${Date.now()}.pdf`);
+    try {
+      fs.writeFileSync(tmpPath, data);
+    } catch (err) {
+      return finish(false, 'Could not write label PDF: ' + err);
+    }
+
+    try { renderWin.destroy(); } catch (_) {}
+    renderWin = null;
+
+    // Silent-print the rendered PDF to the label printer.
+    printWin = new BrowserWindow({
+      show: false,
+      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
+    });
+    printWin.webContents.on('did-fail-load', () =>
+      finish(false, 'Could not open the rendered label PDF for printing'));
+    printWin.webContents.on('did-finish-load', () => {
+      const opts = {
+        silent:          true,
+        printBackground: true,
+        deviceName:      settings.labelPrinter,
+        copies:          settings.labelCopies || 1,
+        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+        margins:         { marginType: 'none' },
+        landscape:       false,
+        scaleFactor:     100,
+      };
+      printWin.webContents.print(opts, (success, reason) => {
+        fs.unlink(tmpPath, () => {});
+        finish(success, success ? null : reason);
+      });
+    });
+    printWin.loadURL('file://' + tmpPath);
+  });
+
+  renderWin.loadURL(url);
 }
 
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
