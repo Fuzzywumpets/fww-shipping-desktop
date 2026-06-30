@@ -10,6 +10,18 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
+// ─── Error logging (fww-error-sink) ──────────────────────────────────────────
+// Reports main-process crashes + render-process-gone to the estate error sink.
+// Best-effort; no-ops unless ERROR_SINK_BEARER is provided in the environment.
+try {
+  require('./fww-logsink.cjs').installMain({
+    app: 'fww-shipping-desktop',
+    repo: 'fuzzyalex84/fww-shipping-desktop',
+    url: 'https://errors.fuzzyreporting.com',
+    bearer: process.env.ERROR_SINK_BEARER,
+  });
+} catch (_) { /* logging must never block app startup */ }
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const SHIPPING_URL = 'https://shipping.fuzzyreporting.com/ui';
