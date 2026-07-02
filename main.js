@@ -569,20 +569,26 @@ function handleLabelSavePdf(url) {
   win.loadURL(url);
 }
 
-// Auto-print a label print-view page. Same proven pipeline the slips use: render
-// the print-view HTML to a PDF buffer first (waiting for the label PNGs to load so
-// the capture is complete), then silent-print that PDF to the LABEL printer at
-// 4×6. Every exit path is guarded (hard timeout, did-fail-load, error dialog) so
-// it can never spin forever with no feedback. Mirrors printSlipViaPdf.
+// Auto-print a label print-view page — mirrors printSlip EXACTLY (direct HTML print).
+// WHY NOT round-trip through a PDF (the old v1.0.14 behavior): the app forces dark mode
+// (nativeTheme 'dark', see app.whenReady), and reprinting a PDF through Chromium's
+// built-in PDF viewer captures THAT viewer's dark canvas with printBackground -> a
+// SOLID BLACK 4×6 label. This is the identical bug packing slips already hit and fixed
+// (see printSlip's comment). The fix is the same: print the print-view HTML DIRECTLY —
+// @media print emulation plus an injected light color-scheme/white background render it
+// WHITE with black barcodes — then silent-print to the LABEL printer (Rollo) at 4×6. No
+// intermediate PDF, no PDF viewer, no black. Every exit path is guarded (hard timeout,
+// did-fail-load, error dialog) so it can never spin forever with no feedback.
+// CHANGE-GUARD: buy a label with auto-print ON — it MUST spool a normal white, scannable
+// 4×6 to the label printer (not a black rectangle); then a 2nd barcode scan must register.
 function printLabelViaPdf(url, settings) {
   // A single label loads one PNG, but /batch/print-view can pull DOZENS of remote
   // ShipStation PNG URLs — a 25-label batch can legitimately take a minute-plus to
   // fully load. Keep the budget generous so a slow batch spools complete instead of
   // capturing blank pages. (The real speed fix is server-side: serve a merged PDF.)
   const LABEL_TIMEOUT_MS = 150000;
-  let renderWin = null;
-  let printWin  = null;
-  let settled   = false;
+  let win     = null;
+  let settled = false;
 
   const finish = (success, reason) => {
     if (settled) return;
@@ -608,9 +614,9 @@ function printLabelViaPdf(url, settings) {
         buttons: ['OK'],
       }).catch(() => {});
     }
+    // Give the spooler a moment to pick up the job before tearing the window down.
     setTimeout(() => {
-      try { if (printWin)  printWin.destroy();  } catch (_) {}
-      try { if (renderWin) renderWin.destroy(); } catch (_) {}
+      try { if (win) win.destroy(); } catch (_) {}
       // INVARIANT: every hidden-window teardown must restore focus or the next
       // barcode scan's keystrokes never reach the page (dead scanner after print).
       restoreMainFocus();
@@ -622,9 +628,11 @@ function printLabelViaPdf(url, settings) {
     LABEL_TIMEOUT_MS
   );
 
-  // Inherit the shipping session so Cloudflare Access cookies apply.
-  renderWin = new BrowserWindow({
+  // Inherit the shipping session so Cloudflare Access cookies apply. White window
+  // background so nothing dark ever shows through (dark-mode safety, like printSlip).
+  win = new BrowserWindow({
     show: false,
+    backgroundColor: '#ffffff',
     webPreferences: {
       partition:        'persist:shipping',
       contextIsolation: true,
@@ -632,22 +640,25 @@ function printLabelViaPdf(url, settings) {
     },
   });
 
-  // Neutralize the page's own window.print() so it can't pop an invisible dialog
-  // in this hidden window — our printToPDF is the only render path.
-  renderWin.webContents.on('dom-ready', () => {
-    renderWin.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+  // Neutralize the page's own window.print() so it can't pop an invisible dialog in
+  // this hidden window — we drive printing ourselves once the page is ready.
+  win.webContents.on('dom-ready', () => {
+    win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
   });
 
-  renderWin.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
+  win.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
     if (isMainFrame) finish(false, `Failed to load label page: ${desc} (${code})`);
   });
 
-  renderWin.webContents.on('did-finish-load', async () => {
-    // Wait until the label PNG(s) finish loading before rendering so we don't
-    // capture the page mid-render. A batch can be dozens of remote PNGs, so cap
-    // the wait high (140s) — far better to wait than to spool blank labels.
+  win.webContents.on('did-finish-load', async () => {
+    // Force a light color scheme + white background (the app runs in forced dark mode),
+    // THEN wait for the label PNG(s) to finish so we never spool a half-loaded page. A
+    // batch can be dozens of remote PNGs, so cap the image wait high (140s).
     try {
-      await renderWin.webContents.executeJavaScript(
+      await win.webContents.executeJavaScript(
+        '(function(){try{var s=document.createElement("style");' +
+        's.textContent=":root{color-scheme:light!important}html,body{background:#fff!important}";' +
+        '(document.head||document.documentElement).appendChild(s);}catch(e){}})();' +
         'new Promise(function(res){var imgs=[].slice.call(document.images);' +
         'var n=imgs.filter(function(i){return !i.complete}).length;' +
         'if(!n)return res();imgs.forEach(function(i){if(!i.complete){' +
@@ -657,54 +668,24 @@ function printLabelViaPdf(url, settings) {
       );
     } catch (_) {}
 
-    let data;
-    try {
-      data = await renderWin.webContents.printToPDF({
-        printBackground: true,
-        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
-        margins:         { marginType: 'none' },
-      });
-    } catch (err) {
-      return finish(false, 'Could not render label PDF: ' + err);
-    }
-
-    const tmpPath = path.join(os.tmpdir(), `fww-label-${Date.now()}.pdf`);
-    try {
-      fs.writeFileSync(tmpPath, data);
-    } catch (err) {
-      return finish(false, 'Could not write label PDF: ' + err);
-    }
-
-    try { renderWin.destroy(); } catch (_) {}
-    renderWin = null;
-
-    // Silent-print the rendered PDF to the label printer.
-    printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
+    // Print the print-view HTML DIRECTLY to the label printer at 4×6 (microns from
+    // settings), no scaling. Same call shape printSlip uses — just the LABEL printer.
+    const opts = {
+      silent:          true,
+      printBackground: true,
+      deviceName:      settings.labelPrinter,
+      copies:          settings.labelCopies || 1,
+      pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+      margins:         { marginType: 'none' },
+      landscape:       false,
+      scaleFactor:     100,
+    };
+    win.webContents.print(opts, (success, reason) => {
+      finish(success, success ? null : reason);
     });
-    printWin.webContents.on('did-fail-load', () =>
-      finish(false, 'Could not open the rendered label PDF for printing'));
-    printWin.webContents.on('did-finish-load', () => {
-      const opts = {
-        silent:          true,
-        printBackground: true,
-        deviceName:      settings.labelPrinter,
-        copies:          settings.labelCopies || 1,
-        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
-        margins:         { marginType: 'none' },
-        landscape:       false,
-        scaleFactor:     100,
-      };
-      printWin.webContents.print(opts, (success, reason) => {
-        fs.unlink(tmpPath, () => {});
-        finish(success, success ? null : reason);
-      });
-    });
-    printWin.loadURL('file://' + tmpPath);
   });
 
-  renderWin.loadURL(url);
+  win.loadURL(url);
 }
 
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
@@ -984,8 +965,10 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
     LABEL_TIMEOUT_MS
   );
 
+  // White window bg so nothing dark ever shows through behind the PDF.
   const printWin = new BrowserWindow({
     show: false,
+    backgroundColor: '#ffffff',
     webPreferences: {
       plugins: true,
       contextIsolation: true,
@@ -1004,7 +987,11 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
     clearTimeout(guard);
     const opts = {
       silent:          true,
-      printBackground: true,
+      // printBackground:false so the dark PDF-viewer canvas (the app is in forced dark
+      // mode) is NOT captured — otherwise this raw-PDF fallback path spools a solid-black
+      // label. The label's own black marks still print; the paper stays white. (The live
+      // path is printLabelViaPdf, which prints the HTML print-view directly like slips.)
+      printBackground: false,
       deviceName:      settings.labelPrinter,
       copies:          settings.labelCopies || 1,
       pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
