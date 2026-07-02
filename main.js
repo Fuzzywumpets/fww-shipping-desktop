@@ -589,6 +589,7 @@ function printLabelViaPdf(url, settings) {
   const LABEL_TIMEOUT_MS = 150000;
   let win     = null;
   let settled = false;
+  let httpStatus = 200;   // main-frame HTTP status of the print-view — guard so we NEVER print an error page
 
   const finish = (success, reason) => {
     if (settled) return;
@@ -640,17 +641,33 @@ function printLabelViaPdf(url, settings) {
     },
   });
 
-  // Neutralize the page's own window.print() so it can't pop an invisible dialog in
-  // this hidden window — we drive printing ourselves once the page is ready.
+  // Neutralize the page's own window.print() AND window.close(): the label print-view
+  // self-prints (img onload -> window.print) and self-closes (afterprint -> window.close,
+  // see labelPrintView in the bridge). We drive the print ourselves; if the page is allowed
+  // to close itself, it tears the webContents down mid-spool on a real label (which takes
+  // longer than the tiny "no label found" text page) and webContents.print() aborts with
+  // success=false and an EMPTY reason — exactly the failure we saw. We own teardown (finish).
   win.webContents.on('dom-ready', () => {
-    win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
+    win.webContents.executeJavaScript('window.print=function(){};window.close=function(){};').catch(() => {});
   });
 
   win.webContents.on('did-fail-load', (e, code, desc, validatedURL, isMainFrame) => {
     if (isMainFrame) finish(false, `Failed to load label page: ${desc} (${code})`);
   });
 
+  // Capture the print-view's main-frame HTTP status. The bridge returns 404 "no label
+  // found" when a label isn't in ShipStation (e.g. one created outside this app); printing
+  // that 404 body is what spooled the black 4×6 (1.0.14) / "no label found" text (1.0.15).
+  win.webContents.on('did-navigate', (_e, _navUrl, code) => { if (code) httpStatus = code; });
+
   win.webContents.on('did-finish-load', async () => {
+    // GUARD 1: never print an error page. If the print-view came back 4xx/5xx (no label in
+    // ShipStation for this order), bail with a clear message instead of spooling garbage.
+    if (httpStatus >= 400) {
+      return finish(false,
+        `No label found in ShipStation for this order (print-view returned HTTP ${httpStatus}), so there is nothing to reprint. Labels created outside this app can't be reprinted here.`);
+    }
+
     // Force a light color scheme + white background (the app runs in forced dark mode),
     // THEN wait for the label PNG(s) to finish so we never spool a half-loaded page. A
     // batch can be dozens of remote PNGs, so cap the image wait high (140s).
@@ -668,17 +685,35 @@ function printLabelViaPdf(url, settings) {
       );
     } catch (_) {}
 
-    // Print the print-view HTML DIRECTLY to the label printer at 4×6 (microns from
-    // settings), no scaling. Same call shape printSlip uses — just the LABEL printer.
+    // GUARD 2: a 200 page with NO loaded label image is also nothing worth printing (a
+    // blank/placeholder page, or a CF Access re-login that 200s). Confirm at least one real
+    // label image before spooling, so we never send a blank/garbage page to the Rollo.
+    let labelImgCount = 0;
+    try {
+      labelImgCount = await win.webContents.executeJavaScript(
+        '[].slice.call(document.images).filter(function(i){return i.complete && i.naturalWidth>0;}).length'
+      );
+    } catch (_) {}
+    if (!labelImgCount) {
+      return finish(false,
+        'The label print-view rendered no label image — nothing to print. The label may not be available in ShipStation for this order.');
+    }
+
+    // Print the print-view HTML DIRECTLY to the label printer at 4×6. Options MATCH the
+    // proven Test-Print path (buildTestLabelHtml → print) EXACTLY. Do NOT add
+    // printBackground or scaleFactor here: on a direct HTML print to the Rollo they made
+    // webContents.print reject the job (success=false, empty reason) — the label reprint
+    // silently failed with "Label Did Not Print". The 1.0.14 code only survived
+    // scaleFactor:100 because it was printing a PDF (which ignores it). The label is a PNG
+    // <img> (prints regardless of printBackground) and the injected light color-scheme +
+    // white bg keep it white despite the app's forced dark mode.
     const opts = {
-      silent:          true,
-      printBackground: true,
-      deviceName:      settings.labelPrinter,
-      copies:          settings.labelCopies || 1,
-      pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
-      margins:         { marginType: 'none' },
-      landscape:       false,
-      scaleFactor:     100,
+      silent:     true,
+      deviceName: settings.labelPrinter,
+      copies:     settings.labelCopies || 1,
+      pageSize:   { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+      margins:    { marginType: 'none' },
+      landscape:  false,
     };
     win.webContents.print(opts, (success, reason) => {
       finish(success, success ? null : reason);
