@@ -545,9 +545,20 @@ function handleLabelSavePdf(url) {
     } catch (e) {}
     const settings = store.get('printSettings');
     try {
+      // UNIT MISMATCH (fixed 7/22 — "Label PDF download: blank"). Electron's TWO print APIs disagree:
+      //   webContents.print()     -> custom pageSize in MICRONS
+      //   webContents.printToPDF() -> custom pageSize in INCHES
+      // printSettings stores MICRONS (labelPaperWidth 101600 = 4in) because every other consumer in
+      // this file is print(). Passing them straight to printToPDF requested a 101600 x 152400 INCH
+      // page, so the 4x6 label rendered as a speck in the corner of an enormous sheet — the saved PDF
+      // opened BLANK. The slip PDF was never affected: it passes the string 'Letter' (no units).
+      // CHANGE-GUARD: "Label PDF" on a shipped order must open a PDF showing the FULL 4x6 label.
+      const MICRONS_PER_INCH = 25400;
+      const _wIn = (Number(settings.labelPaperWidth)  || 101600) / MICRONS_PER_INCH;
+      const _hIn = (Number(settings.labelPaperHeight) || 152400) / MICRONS_PER_INCH;
       const data = await win.webContents.printToPDF({
         printBackground: true,
-        pageSize:        { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+        pageSize:        { width: _wIn, height: _hIn },
         margins:         { marginType: 'none' },
       });
       win.destroy();
