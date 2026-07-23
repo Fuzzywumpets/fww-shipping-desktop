@@ -569,10 +569,10 @@ function handleLabelSavePdf(url) {
       fs.writeFileSync(tmpPath, data);
       const viewer = new BrowserWindow({ width: 560, height: 900, title: fname, autoHideMenuBar: true, webPreferences: { plugins: true } });
       viewer.loadURL('file:///' + tmpPath.replace(/\\/g, '/'));
-      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: true, path: tmpPath });
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: true, path: tmpPath, timestamp: Date.now() });
     } catch (err) {
       console.error('[fww-print] label PDF save failed:', err);
-      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: false, reason: String(err) });
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: false, reason: String(err), timestamp: Date.now() });
       win.destroy();
       restoreMainFocus();
     }
@@ -613,7 +613,7 @@ function printLabelViaPdf(url, settings) {
     }
     if (mainWindow) {
       mainWindow.webContents.send('print:status', {
-        type: 'label', success, reason: reason || null, printer: settings.labelPrinter,
+        type: 'label', success, reason: reason || null, printer: settings.labelPrinter, timestamp: Date.now(),
       });
     }
     if (!success && mainWindow) {
@@ -767,7 +767,7 @@ function handleSlipSavePdf(url) {
     clearTimeout(guard);
     if (success) return; // success path destroys the hidden win itself + keeps viewer focus
     console.error('[fww-print] slip PDF save failed:', reason);
-    if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(reason) });
+    if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: false, reason: String(reason), timestamp: Date.now() });
     try { if (win) win.destroy(); } catch (_) {}
     restoreMainFocus();
   };
@@ -824,7 +824,7 @@ function handleSlipSavePdf(url) {
       // viewer, which has its own Save + Print controls. No save-folder prompt.
       const viewer = new BrowserWindow({ width: 920, height: 1100, title: fname, autoHideMenuBar: true, webPreferences: { plugins: true } });
       viewer.loadURL('file:///' + tmpPath.replace(/\\/g, '/'));
-      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: tmpPath });
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'slip-pdf', success: true, path: tmpPath, timestamp: Date.now() });
     } catch (err) {
       finish(false, err); // destroys the hidden win once + restoreMainFocus() + sends failure status
     }
@@ -882,7 +882,7 @@ function printSlip(url, settings) {
     }
     if (mainWindow) {
       mainWindow.webContents.send('print:status', {
-        type: 'slip', success, reason: reason || null, printer: settings.slipPrinter,
+        type: 'slip', success, reason: reason || null, printer: settings.slipPrinter, timestamp: Date.now(),
       });
     }
     if (!success && mainWindow) {
@@ -1000,7 +1000,7 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
     clearTimeout(guard);
     console.error(`[fww-print] label print failed: ${reason}`);
     mainWindow?.webContents.send('print:status', {
-      type: 'label', success: false, reason: String(reason), printer: settings.labelPrinter,
+      type: 'label', success: false, reason: String(reason), printer: settings.labelPrinter, timestamp: Date.now(),
     });
     cleanup();
   };
@@ -1050,12 +1050,12 @@ function silentPrintPdfBuffer(buf, labelId, settings) {
       if (!success) {
         console.error(`[fww-print] label print failed: ${reason}`);
         mainWindow?.webContents.send('print:status', {
-          type: 'label', success: false, reason, printer: settings.labelPrinter,
+          type: 'label', success: false, reason, printer: settings.labelPrinter, timestamp: Date.now(),
         });
       } else {
         console.log(`[fww-print] label ${labelId} printed to "${settings.labelPrinter}"`);
         mainWindow?.webContents.send('print:status', {
-          type: 'label', success: true, labelId, printer: settings.labelPrinter,
+          type: 'label', success: true, labelId, printer: settings.labelPrinter, timestamp: Date.now(),
         });
       }
       setTimeout(() => { printWin.destroy(); restoreMainFocus(); }, 1500);
