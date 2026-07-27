@@ -289,6 +289,18 @@ function createMainWindow() {
     }
     if (url.startsWith('https://shipping.fuzzyreporting.com') ||
         url.startsWith('https://accounts.google.com') ||
+        // CF Access team domain — the login flow 302s shipping.fuzzyreporting.com to
+        // https://<team>.cloudflareaccess.com/cdn-cgi/access/login/... When any step of that flow
+        // opens as a POPUP (a new window, which is all setWindowOpenHandler governs), this branch must
+        // catch it or the popup falls through to shell.openExternal() below — ejected to the system
+        // browser, where it CANNOT complete back into the app's persist:shipping session, so login
+        // silently dies. This bit ONLY out-of-org users (7/27: erin.m.karson@gmail.com, the sole
+        // non-@fuzzywumpets.com account): in-org Workspace logins flow as top-level redirects that
+        // setWindowOpenHandler never sees, while an external Google account gets an extra interstitial
+        // that opens as a popup and hit this gap. The team domain was never in the allow-list — a
+        // hardcoded dependency on the login flow's exact domains that silently omitted this one.
+        // Matches any <team>.cloudflareaccess.com so a team-domain rename can't re-break it.
+        /^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com\//i.test(url) ||
         url.startsWith('https://fww-shipping-bridge.')) {
       // Let auth popups open normally
       return { action: 'allow' };
