@@ -4,6 +4,14 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // ─── Expose safe APIs to the renderer ────────────────────────────────────────
 
+// DEPENDS: every ipcRenderer.send/invoke/on channel name below must exactly match an
+// ipcMain.on/handle registration (or a webContents.send) in main.js — no shared import
+// enforces this string match:
+//   print:open-manager    -> main.js ipcMain.on('print:open-manager')  (openPrintManager)
+//   print:label-pdf       -> main.js ipcMain.on('print:label-pdf')     (silentPrintPdfBuffer)
+//   print:slip-url        -> main.js ipcMain.on('print:slip-url')     (handleSlipPrint)
+//   print:status  (recv)  -> main.js mainWindow.webContents.send('print:status', ...)
+//   updater:status (recv) -> main.js autoUpdater 'update-available'/'update-downloaded' handlers
 contextBridge.exposeInMainWorld('__fwwDesktop', {
   // Is this the desktop app?
   isDesktop: true,
@@ -55,6 +63,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
 if (location.protocol === 'file:') {
   // We're in the print manager window
+  // DEPENDS: channel names below must match main.js exactly — printers:list, settings:get,
+  // settings:set, print:test, app:version are all ipcMain.handle(...) registrations there.
+  // settings:get/settings:set also carry the printSettings field shape, which is separately
+  // SYNC'd against print-manager.html at main.js's store.defaults declaration.
   contextBridge.exposeInMainWorld('printManagerAPI', {
     getPrinters:    ()       => ipcRenderer.invoke('printers:list'),
     getSettings:    ()       => ipcRenderer.invoke('settings:get'),
