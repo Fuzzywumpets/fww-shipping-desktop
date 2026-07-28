@@ -305,8 +305,31 @@ function createMainWindow() {
       // Let auth popups open normally
       return { action: 'allow' };
     }
-    // Other links open in default browser
-    shell.openExternal(url);
+    // Other links open in the default browser — but ONLY real web links.
+    // shell.openExternal() hands the URL straight to Windows, which pops "no app for this link. Open
+    // app store?" for any scheme it doesn't recognise. A bare window.open('', '_blank') — the
+    // popup-blocker pre-open in detailPrintLabel — arrives here as "about:blank"/""; data:/blob: would
+    // too. None of those are openable by any app, so the dialog was pure noise on real label buys
+    // (Alex, 7/28: "it did work, but I got a 'no app for this link'").
+    // DEPENDENCY CHECKED before narrowing this branch: the only callers that legitimately rely on it
+    // are the Shopify admin deep-link (window.open('https://admin.shopify.com/...')) and carrier
+    // tracking links — both http(s), so both still open exactly as before. Every in-app route
+    // (/label/print-view, /batch/print-view, /slip-render) is already claimed by the branches above.
+    if (/^https?:\/\//i.test(String(url || ''))) {
+      shell.openExternal(url);
+    } else {
+      // Never hand a non-web scheme to the OS. Log it loudly so a future occurrence names itself
+      // rather than costing another round of guessing.
+      console.warn('[fww-shell] refused non-web window.open:', JSON.stringify(String(url || '')));
+      try {
+        require('./fww-logsink.cjs').reportEvent({
+          app: 'fww-shipping-desktop', repo: 'fuzzyalex84/fww-shipping-desktop',
+          kind: 'warn', severity: 'warning',
+          message: 'refused non-web window.open (would have popped the OS "no app for this link" dialog)',
+          context: { url: String(url || ''), scheme: (String(url || '').split(':')[0] || '(empty)') },
+        });
+      } catch (_) { /* logging must never break the shell */ }
+    }
     return { action: 'deny' };
   });
 
