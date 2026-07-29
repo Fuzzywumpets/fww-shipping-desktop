@@ -13,6 +13,10 @@ const fs = require('fs');
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
 // Best-effort; no-ops unless ERROR_SINK_BEARER is provided in the environment.
+// SYNC: 'app' and 'repo' below must match package.json's "name" and
+// build.publish.owner+"/"+build.publish.repo — the error-sink dashboard groups/links
+// events by these exact strings (package.json can't hold a comment, so this is the
+// only place the coupling is documented).
 try {
   require('./fww-logsink.cjs').installMain({
     app: 'fww-shipping-desktop',
@@ -25,11 +29,20 @@ try {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const SHIPPING_URL = 'https://shipping.fuzzyreporting.com/ui';
+// SYNC: APP_NAME must match package.json build.productName; ICON_PATH's target file
+// must match package.json build.icon / build.win.icon AND the <img src> in auth.html
+// (loading-screen logo) — package.json can't hold a comment, so this is the only
+// place the coupling is documented.
 const APP_NAME     = 'FWW Shipping';
 const ICON_PATH    = path.join(__dirname, 'assets', 'icon.png');
 
 // ─── Persistent settings store ───────────────────────────────────────────────
 
+// SYNC: every key in printSettings below is read/written by print-manager.html's
+// script via matching element IDs (labelPrinter, slipPrinter, labelPaperWidth, etc.)
+// over the settings:get/settings:set IPC round-trip (see preload.js printManagerAPI).
+// Renaming a key here without updating print-manager.html breaks that field silently
+// (it just falls back to its default).
 const store = new Store({
   name: 'config',
   defaults: {
@@ -311,6 +324,8 @@ function createMainWindow() {
     // popup-blocker pre-open in detailPrintLabel — arrives here as "about:blank"/""; data:/blob: would
     // too. None of those are openable by any app, so the dialog was pure noise on real label buys
     // (Alex, 7/28: "it did work, but I got a 'no app for this link'").
+    // DEPENDS: this branch only sees a URL that isSlipRenderUrl()/isLabelPrintViewUrl() and the
+    // explicit allow-list above did NOT already claim — ordering matters, this must stay last.
     // DEPENDENCY CHECKED before narrowing this branch: the only callers that legitimately rely on it
     // are the Shopify admin deep-link (window.open('https://admin.shopify.com/...')) and carrier
     // tracking links — both http(s), so both still open exactly as before. Every in-app route
