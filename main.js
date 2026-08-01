@@ -445,10 +445,10 @@ function printSlip(url, settings) {
   };
 
   // Hard safety net so a slow/stuck slip page can never hang indefinitely.
-  const guard = setTimeout(
-    () => finish(false, `Timed out after ${SLIP_TIMEOUT_MS / 1000}s loading the packing slip`),
-    SLIP_TIMEOUT_MS
-  );
+  const guard = setTimeout(() => {
+    try { win?.webContents?.stop(); } catch (_) {}
+    finish(false, `Timed out after ${SLIP_TIMEOUT_MS / 1000}s loading the packing slip`);
+  }, SLIP_TIMEOUT_MS);
 
   // Inherit the same session so Cloudflare Access cookies apply. White window
   // background so nothing dark ever shows through.
@@ -473,6 +473,7 @@ function printSlip(url, settings) {
   });
 
   win.webContents.on('did-finish-load', async () => {
+    if (settled || !win || win.isDestroyed() || win.webContents.isDestroyed()) return;
     // Force a light color scheme + white background (the app runs in forced dark
     // mode), then wait for images (the logo) to finish so nothing prints
     // half-loaded. Cap the image wait at 4s as a safety net.
@@ -490,6 +491,8 @@ function printSlip(url, settings) {
       );
     } catch (_) {}
 
+    if (settled || !win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+
     const opts = {
       silent:          true,
       printBackground: true,
@@ -499,6 +502,7 @@ function printSlip(url, settings) {
       margins:         { marginType: 'printableArea' },
       landscape:       false,
     };
+    if (settled || !win || win.isDestroyed() || win.webContents.isDestroyed()) return;
     win.webContents.print(opts, (success, reason) => {
       finish(success, success ? null : reason);
     });
