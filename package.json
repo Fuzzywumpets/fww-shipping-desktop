@@ -1,6 +1,6 @@
 {
   "name": "fww-shipping-desktop",
-  "version": "1.0.9",
+  "version": "1.0.18",
   "description": "Fuzzywumpets Shipping — desktop app with background printing",
   "author": "Fuzzywumpets",
   "main": "main.js",
@@ -26,7 +26,8 @@
     "publish": {
       "provider": "github",
       "owner": "fuzzyalex84",
-      "repo": "fww-shipping-desktop"
+      "repo": "fww-shipping-desktop",
+      "releaseType": "release"
     },
     "win": {
       "target": [
@@ -38,12 +39,12 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "requestedExecutionLevel": "asInvoker"
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "FWW-Shipping-Setup-${version}.${ext}"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "allowElevation": true,
+      "oneClick": true,
+      "perMachine": false,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
@@ -51,11 +52,11 @@
       "createStartMenuShortcut": true,
       "shortcutName": "FWW Shipping",
       "runAfterFinish": true,
-      "deleteAppDataOnUninstall": false,
-      "license": null
+      "deleteAppDataOnUninstall": false
     },
     "files": [
       "main.js",
+      "fww-logsink.cjs",
       "preload.js",
       "print-manager.html",
       "auth.html",

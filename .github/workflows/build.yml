@@ -6,6 +6,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# electron-builder creates the GitHub Release, so the workflow token must be able
+# to write release contents. (A read-only token here used to make publish 403.)
+permissions:
+  contents: write
+
 jobs:
   build-win:
     runs-on: windows-latest
@@ -20,24 +25,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build NSIS installer
-        run: npm run dist
+      # SINGLE publisher. electron-builder uploads the installer, its .blockmap,
+      # and latest.yml with matching file names + SHA512 hashes — which is exactly
+      # what electron-updater reads to verify and apply an update. The previous
+      # workflow ALSO ran softprops/action-gh-release, which uploaded a SECOND copy
+      # of the .exe under a different (dotted) name and re-uploaded the yml files —
+      # two publishers, a duplicate installer, and a real risk of latest.yml no
+      # longer matching the downloadable file. releaseType is set to "release" in
+      # package.json so this publishes a NON-draft release that electron-updater
+      # can actually see.
+      - name: Build & publish NSIS installer
+        run: npm run dist -- --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifacts
+      # CI artifact only — for debugging a build. This does NOT touch the Release.
+      - name: Upload CI artifact
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
           path: dist/*.exe
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.exe
-            dist/*.yml
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
