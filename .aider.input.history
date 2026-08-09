@@ -1,0 +1,3 @@
+
+# 2026-07-22 22:19:11.869206
++Add a 'timestamp: Date.now()' field to every mainWindow.webContents.send('print:status', {...}) call in main.js, so every print-status event carries a consistent timestamp for debugging/audit. Do not change any other behavior, field names, or logic.
