@@ -6,6 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "node --test",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win --dir",
     "postinstall": "electron-builder install-app-deps"
@@ -56,6 +57,7 @@
     },
     "files": [
       "main.js",
+      "print-guards.js",
       "fww-logsink.cjs",
       "preload.js",
       "print-manager.html",

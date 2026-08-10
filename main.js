@@ -9,6 +9,10 @@ const Store = require('electron-store').default || require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+// Redirect guard for the hidden print windows — an expired CF Access session
+// 200-commits a LOGIN page, which must never spool as a label/slip (full MONEY-CRITICAL
+// rationale + regression tests live with the module: print-guards.js).
+const { verifyPrintPageUrl, LABEL_PRINT_VIEW_PATH_RE } = require('./print-guards.js');
 
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
@@ -581,6 +585,17 @@ function handleLabelSavePdf(url) {
     win.webContents.executeJavaScript('window.print = function(){};').catch(() => {});
   });
   win.webContents.on('did-finish-load', async () => {
+    // MONEY-PATH GUARD: refuse to render a CF Access login page (an expired session
+    // commits with HTTP 200 on a different origin) as a "label" PDF — see print-guards.js.
+    const redirectReason = verifyPrintPageUrl(url, win.webContents.getURL(), LABEL_PRINT_VIEW_PATH_RE);
+    if (redirectReason) {
+      console.error('[fww-print] label PDF save failed:', redirectReason);
+      if (mainWindow) mainWindow.webContents.send('print:status', { type: 'label-pdf', success: false, reason: redirectReason, timestamp: Date.now() });
+      try { win.destroy(); } catch (_) {}
+      restoreMainFocus();
+      return;
+    }
+
     // Wait for the label images to finish loading before rendering. A batch can be
     // dozens of remote PNGs, so cap high (140s) rather than save a blank-page PDF.
     try {
@@ -722,6 +737,15 @@ function printLabelViaPdf(url, settings) {
   win.webContents.on('did-navigate', (_e, _navUrl, code) => { if (code) httpStatus = code; });
 
   win.webContents.on('did-finish-load', async () => {
+    // GUARD 0 (MONEY-CRITICAL): the window must have ENDED the load on the page it was
+    // asked to load. An expired CF Access session redirects to
+    // https://<team>.cloudflareaccess.com/... which commits with HTTP 200 (passes GUARD 1)
+    // and can render an org-logo image (passes GUARD 2) — without this check the LOGIN
+    // PAGE spools to the Rollo and print:status reports success:true for a bought,
+    // real-money label that never printed. See print-guards.js.
+    const redirectReason = verifyPrintPageUrl(url, win.webContents.getURL(), LABEL_PRINT_VIEW_PATH_RE);
+    if (redirectReason) return finish(false, redirectReason);
+
     // GUARD 1: never print an error page. If the print-view came back 4xx/5xx (no label in
     // ShipStation for this order), bail with a clear message instead of spooling garbage.
     if (httpStatus >= 400) {
@@ -844,6 +868,12 @@ function handleSlipSavePdf(url) {
     if (isMainFrame) finish(false, `Failed to load slip page: ${desc} (${code})`);
   });
   win.webContents.on('did-finish-load', async () => {
+    // Same expired-session guard as the label paths (origin only — the slip-render URL
+    // shape is looser, see isSlipRenderUrl): a CF Access login page must never be
+    // rendered and shown as "the packing slips". See print-guards.js.
+    const redirectReason = verifyPrintPageUrl(url, win.webContents.getURL(), null);
+    if (redirectReason) return finish(false, redirectReason);
+
     // Wait until images (the logo) actually finish loading before rendering. A fixed
     // timeout could capture the page mid-render → a complete-but-corrupt PDF that
     // readers like Edge refuse to open. Cap the wait at 4s as a safety net.
