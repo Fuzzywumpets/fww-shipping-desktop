@@ -513,6 +513,14 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   const widthMm  = parseFloat(document.getElementById('labelWidth').value)  || 101.6;
   const heightMm = parseFloat(document.getElementById('labelHeight').value) || 152.4;
 
+  // SYNC: printSettings shape — every key in newSettings (and read back in
+  // loadSettings above) must match main.js store.defaults.printSettings exactly;
+  // a renamed/missing key silently falls back to its default over the
+  // settings:get/settings:set IPC round-trip (preload.js printManagerAPI).
+  // labelPaperWidth/Height stay MICRONS: mm * 1000 here is the inverse of
+  // loadSettings' / 1000, and main.js converts microns → inches for printToPDF —
+  // changing the unit on either side breaks 4x6 label printing (the 7/22
+  // blank-label bug).
   const newSettings = {
     labelPrinter:     document.getElementById('labelPrinter').value || null,
     slipPrinter:      document.getElementById('slipPrinter').value  || null,
