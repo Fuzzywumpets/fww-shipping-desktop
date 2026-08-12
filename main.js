@@ -1150,6 +1150,31 @@ ipcMain.on('print:slip-url', (event, { url }) => {
   handleSlipPrint(url); // (removed an unused store.get(printSettings) read; handleSlipPrint re-reads it)
 });
 
+// Label / batch-label print-view triggered from the page, WITHOUT window.open().
+// This is the same handleLabelPrint() that setWindowOpenHandler calls for these URLs — only the way
+// it is reached changes. It exists because window.open() is gesture-gated: after the ~minutes-long
+// /batch/print buy, the click's transient user-activation is gone and Chromium drops the call
+// silently, so setWindowOpenHandler never fires and nothing spools (2026-08-12). ipcRenderer.send
+// cannot be dropped that way. Slips already had this bypass (print:slip-url above); batches did not.
+// Guarded because this arrives straight from the page: only ever hand handleLabelPrint a print-view
+// URL on the bridge host, so a compromised/odd page cannot drive the Rollo with an arbitrary URL.
+// DEPENDS: isLabelPrintViewUrl() defines which paths are eligible — the same predicate
+// setWindowOpenHandler uses, so both routes stay in lockstep by construction.
+ipcMain.on('print:label-url', (event, { url }) => {
+  const u = String(url || '');
+  let host = '';
+  try { host = new URL(u).host; } catch (_) { host = ''; }
+  // SYNC: bridge hosts — the same two origins the setWindowOpenHandler allow-list accepts
+  // (main.js ~L303: shipping.fuzzyreporting.com and fww-shipping-bridge.*.workers.dev). If a host is
+  // added or renamed there, add it here too, or batch spooling breaks on the new origin only.
+  const okHost = host === 'shipping.fuzzyreporting.com' || /^fww-shipping-bridge\.[a-z0-9-]+\.workers\.dev$/i.test(host);
+  if (!/^https:\/\//i.test(u) || !okHost || !isLabelPrintViewUrl(u)) {
+    console.warn('[fww-shell] refused print:label-url (not a bridge print-view URL):', JSON.stringify(u));
+    return;
+  }
+  handleLabelPrint(u);
+});
+
 // Open print manager window
 ipcMain.on('print:open-manager', () => openPrintManager());
 
