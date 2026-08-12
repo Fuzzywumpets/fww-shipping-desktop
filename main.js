@@ -1160,19 +1160,28 @@ ipcMain.on('print:slip-url', (event, { url }) => {
 // URL on the bridge host, so a compromised/odd page cannot drive the Rollo with an arbitrary URL.
 // DEPENDS: isLabelPrintViewUrl() defines which paths are eligible — the same predicate
 // setWindowOpenHandler uses, so both routes stay in lockstep by construction.
-ipcMain.on('print:label-url', (event, { url }) => {
-  const u = String(url || '');
-  let host = '';
-  try { host = new URL(u).host; } catch (_) { host = ''; }
-  // SYNC: bridge hosts — the same two origins the setWindowOpenHandler allow-list accepts
-  // (main.js ~L303: shipping.fuzzyreporting.com and fww-shipping-bridge.*.workers.dev). If a host is
-  // added or renamed there, add it here too, or batch spooling breaks on the new origin only.
-  const okHost = host === 'shipping.fuzzyreporting.com' || /^fww-shipping-bridge\.[a-z0-9-]+\.workers\.dev$/i.test(host);
-  if (!/^https:\/\//i.test(u) || !okHost || !isLabelPrintViewUrl(u)) {
-    console.warn('[fww-shell] refused print:label-url (not a bridge print-view URL):', JSON.stringify(u));
+// Payload is NOT destructured in the signature on purpose: a message sent with no second argument
+// would throw before any validation ran, inside a main-process IPC handler. New IPC surface, so it
+// hardens against a malformed send rather than trusting the intended caller.
+ipcMain.on('print:label-url', (event, payload) => {
+  const url = String((payload && payload.url) || '');
+  let u = null;
+  try { u = new URL(url); } catch (_) { u = null; }
+  // SYNC: bridge origins — must accept exactly what setWindowOpenHandler's allow-list accepts
+  // (main.js ~L303: shipping.fuzzyreporting.com, and any https://fww-shipping-bridge. prefix).
+  // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
+  // while the window-open route accepted it — silently re-breaking spooling on that origin only.
+  const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
+                      || u.hostname.startsWith('fww-shipping-bridge.'));
+  // Match the PATHNAME, not the whole URL. isLabelPrintViewUrl() is a substring test, so
+  // /account?next=/label/print-view satisfies it — enough for a page to make the shell fetch and
+  // print an arbitrary same-host page. The path boundary keeps /label/print-viewX out too.
+  const okPath = !!u && /^\/(?:label|batch)\/print-view(?:\/|$)/.test(u.pathname);
+  if (!u || u.protocol !== 'https:' || !okHost || !okPath) {
+    console.warn('[fww-shell] refused print:label-url (not a bridge print-view URL):', JSON.stringify(url));
     return;
   }
-  handleLabelPrint(u);
+  handleLabelPrint(url);
 });
 
 // Open print manager window
