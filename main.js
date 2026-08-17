@@ -1145,9 +1145,41 @@ ipcMain.on('print:label-pdf', (event, { labelId, data }) => {
   silentPrintPdfBuffer(buf, labelId, settings);
 });
 
-// Slip print triggered from page
-ipcMain.on('print:slip-url', (event, { url }) => {
-  handleSlipPrint(url); // (removed an unused store.get(printSettings) read; handleSlipPrint re-reads it)
+// Slip print triggered from page (preload: __fwwDesktop.printSlip + the fww:slip-print bridge).
+// Guarded exactly like print:label-url below, and for the same reason: this arrives straight
+// from the page, and handleSlipPrint loads the URL in an authenticated hidden window
+// (partition persist:shipping) and prints/saves it — so an arbitrary same-renderer page must
+// not be able to point the shell at ANY URL.
+// Relative inputs are REPAIRED (resolved against the bridge origin), not refused: the bridge UI
+// sent bare '/slip-render?…' paths until fww-shipping-bridge PR #51 (ea83c1d) absolutized the
+// sender, and a cached pre-#51 UI — or a future sender regression — would hard-fail
+// BrowserWindow.loadURL with ERR_INVALID_URL (-300), the exact break that killed every desktop
+// slip print 2026-08-12 → 2026-08-17.
+// Payload is NOT destructured in the signature on purpose: a message sent with no second argument
+// would throw before any validation ran, inside a main-process IPC handler.
+ipcMain.on('print:slip-url', (event, payload) => {
+  const raw = String((payload && payload.url) || '');
+  let u = null;
+  // The base only kicks in for relative input ('/slip-render?…' → bridge URL); an absolute
+  // raw ignores it, so a foreign absolute URL cannot "borrow" the bridge origin here.
+  try { u = new URL(raw, 'https://shipping.fuzzyreporting.com'); } catch (_) { u = null; }
+  // SYNC: bridge origins — must accept exactly what setWindowOpenHandler's allow-list accepts
+  // (main.js ~L303: shipping.fuzzyreporting.com, and any https://fww-shipping-bridge. prefix).
+  // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
+  // while the window-open route accepted it — silently re-breaking slip printing on that origin only.
+  const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
+                      || u.hostname.startsWith('fww-shipping-bridge.'));
+  // Match the PATHNAME, not the whole URL. isSlipRenderUrl() is a substring test, so
+  // /account?next=/slip-render satisfies it — enough for a page to make the shell fetch and
+  // print an arbitrary same-host page. The path boundary keeps /slip-renderX out too.
+  const okPath = !!u && /^\/slip-render(?:\/|$)/.test(u.pathname);
+  if (!u || u.protocol !== 'https:' || !okHost || !okPath) {
+    console.warn('[fww-shell] refused print:slip-url (not a bridge slip-render URL):', JSON.stringify(raw));
+    return;
+  }
+  // u.href, never raw: raw may have been relative and handleSlipPrint's branches all need an
+  // absolute URL (loadURL AND shell.openExternal). handleSlipPrint re-reads printSettings itself.
+  handleSlipPrint(u.href);
 });
 
 // Label / batch-label print-view triggered from the page, WITHOUT window.open().
