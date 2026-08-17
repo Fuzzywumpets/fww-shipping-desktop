@@ -497,19 +497,26 @@ function injectPrintButton(wc) {
 // A URL that fails here is NOT dropped: setWindowOpenHandler falls through to the
 // allow-list (same-host popup) or shell.openExternal (system browser) — visible, and
 // printless either way.
-// SYNC: trusted print hosts — must accept exactly what setWindowOpenHandler's allow-list
-// accepts (the branch after the print branches: shipping.fuzzyreporting.com + any
-// https://fww-shipping-bridge. prefix) and what the print:label-url IPC guard's okHost
-// accepts (see ipcMain.on('print:label-url')). Compare on hostname, never .host:
-// .host carries :port, so a legitimate explicit-port URL would be refused here while the
-// allow-list accepted it — the print branch would silently stop intercepting on that
-// origin and print-views would open as visible popups instead of spooling.
+// SYNC: trusted print hosts — keep IDENTICAL to the print:slip-url / print:label-url IPC
+// guards' okHost (see ipcMain.on handlers). The fww-shipping-bridge. arm pins BOTH the
+// prefix AND the .workers.dev suffix, a deliberate strict subset: prefix-only accepts a
+// foreign registrable-domain lookalike (fww-shipping-bridge.attacker.example) and — because
+// this gates what the two print branches fetch in the AUTHENTICATED persist:shipping hidden
+// window — would PRINT it. No legitimate bridge host lives outside fww-shipping-bridge.*.workers.dev
+// (the custom domain shipping.fuzzyreporting.com is the exact-match arm), so the only URLs the
+// suffix refuses were never ours. Such a lookalike is not dropped: it fails these predicates,
+// falls through setWindowOpenHandler, and (until the allow-list is itself hostname-parsed — see
+// follow-up task) opens as a same-tier popup, never an authenticated print.
+// Compare on hostname, never .host: .host carries :port, so a legitimate explicit-port URL
+// would be refused here while the allow-list accepted it — the print branch would silently
+// stop intercepting on that origin and print-views would open as visible popups instead of spooling.
 function trustedPrintViewUrl(url) {
   let u = null;
   try { u = new URL(String(url || '')); } catch (_) { return null; }
   if (u.protocol !== 'https:') return null;
-  if (u.hostname !== 'shipping.fuzzyreporting.com' &&
-      !u.hostname.startsWith('fww-shipping-bridge.')) return null;
+  const okHost = u.hostname === 'shipping.fuzzyreporting.com'
+              || (u.hostname.startsWith('fww-shipping-bridge.') && u.hostname.endsWith('.workers.dev'));
+  if (!okHost) return null;
   return u;
 }
 
