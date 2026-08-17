@@ -32,6 +32,7 @@ const fs = require('fs');
 // below those.
 if (process.env.FWW_SHIPPING_USERDATA_DIR) {
   const sandboxDir = path.resolve(process.env.FWW_SHIPPING_USERDATA_DIR);
+  fs.mkdirSync(sandboxDir, { recursive: true }); // setPath must never see a missing dir
   app.setPath('userData', sandboxDir);
   app.setPath('sessionData', sandboxDir);
 }
@@ -153,7 +154,7 @@ function migrateLegacyFallbackConfig() {
     console.error('[fww-config] legacy settings migration failed:', e?.message || e);
   }
 }
-migrateLegacyFallbackConfig();
+// (called below, after the single-instance gate)
 
 // ─── Single instance lock ─────────────────────────────────────────────────────
 
@@ -167,6 +168,13 @@ migrateLegacyFallbackConfig();
 // because a zombie process still holds the lock).
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); process.exit(0); }
+
+// Migrate only AFTER winning the single-instance gate: a launch that loses the
+// lock hard-exits above and must never migrate or set the one-shot marker —
+// it could freeze a settings snapshot while the surviving (older) instance
+// keeps writing to the legacy file. Still runs before app.whenReady(), so no
+// consumer can read the store before migration completes.
+migrateLegacyFallbackConfig();
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
