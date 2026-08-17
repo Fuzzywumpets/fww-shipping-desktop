@@ -279,14 +279,23 @@ function createMainWindow() {
 
   // Intercept new-window requests (slip-render pages, PDF downloads, etc.)
 // NEW-WINDOW ROUTER. Decides what happens when the page opens a new window/tab:
-//   - slip-render URLs  -> intercepted, printed/saved by handleSlipPrint, window DENIED
+//   - TRUSTED slip-render URLs        -> intercepted, printed/saved by handleSlipPrint, window DENIED
+//   - TRUSTED label/batch print-views -> intercepted, printed by handleLabelPrint, window DENIED
 //   - shipping / Google accounts / bridge URLs -> ALLOWED (these are real auth popups)
 //   - anything else -> opened in the system browser, window DENIED
+// "TRUSTED" = https + shipping/bridge host + exact path boundary (see trustedPrintViewUrl).
+// The print branches load their URL in an AUTHENTICATED hidden window (persist:shipping)
+// and print it, and window.open is page-controlled input — so they must never fire for a
+// foreign lookalike like https://evil.com/slip-render. A URL that fails validation
+// deliberately FALLS THROUGH: same-host non-print URLs to the allow-list popup, everything
+// else to the system browser — visible and printless either way, never silently dropped.
 // INVARIANT: the slip-render branch MUST run before the allow-list, and the allow-list
 // MUST keep accounts.google.com + the bridge host or CF Access / Google login popups
 // get hijacked into the external browser and auth breaks.
-// CHANGE-GUARD: TEST printing a packing slip (slip window must NOT pop visibly) AND a
-// fresh CF Access / Google sign-in (popup must open IN-APP, not in Chrome).
+// CHANGE-GUARD: TEST printing a packing slip (slip window must NOT pop visibly), a label
+// reprint, a fresh CF Access / Google sign-in (popup must open IN-APP, not in Chrome),
+// AND window.open('https://evil.example.com/slip-render') from DevTools — it must open in
+// the system browser, not print.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isSlipRenderUrl(url)) {
       handleSlipPrint(url);
@@ -326,6 +335,8 @@ function createMainWindow() {
     // (Alex, 7/28: "it did work, but I got a 'no app for this link'").
     // DEPENDS: this branch only sees a URL that isSlipRenderUrl()/isLabelPrintViewUrl() and the
     // explicit allow-list above did NOT already claim — ordering matters, this must stay last.
+    // Foreign lookalikes of the print routes (e.g. https://evil.com/slip-render) now deliberately
+    // land here and open visibly in the system browser instead of being printed authenticated.
     // DEPENDENCY CHECKED before narrowing this branch: the only callers that legitimately rely on it
     // are the Shopify admin deep-link (window.open('https://admin.shopify.com/...')) and carrier
     // tracking links — both http(s), so both still open exactly as before. Every in-app route
@@ -476,12 +487,41 @@ function injectPrintButton(wc) {
 
 // ─── Slip print flow ──────────────────────────────────────────────────────────
 
+// SECURITY GATE for setWindowOpenHandler's two print branches. These predicates decide
+// what the shell will fetch in an AUTHENTICATED hidden window (partition persist:shipping)
+// and hand to the printer, from page-controlled input (window.open). They were plain
+// substring tests, so window.open('https://evil.com/slip-render?x') during any user
+// gesture printed a foreign page with the shipping session attached — the same hole the
+// print:label-url IPC guard (PR #7/#8 hardening) closes on the IPC route. Validate the
+// same way: parse with new URL(), https only, host allow-list, path boundary.
+// A URL that fails here is NOT dropped: setWindowOpenHandler falls through to the
+// allow-list (same-host popup) or shell.openExternal (system browser) — visible, and
+// printless either way.
+// SYNC: trusted print hosts — must accept exactly what setWindowOpenHandler's allow-list
+// accepts (the branch after the print branches: shipping.fuzzyreporting.com + any
+// https://fww-shipping-bridge. prefix) and what the print:label-url IPC guard's okHost
+// accepts (see ipcMain.on('print:label-url')). Compare on hostname, never .host:
+// .host carries :port, so a legitimate explicit-port URL would be refused here while the
+// allow-list accepted it — the print branch would silently stop intercepting on that
+// origin and print-views would open as visible popups instead of spooling.
+function trustedPrintViewUrl(url) {
+  let u = null;
+  try { u = new URL(String(url || '')); } catch (_) { return null; }
+  if (u.protocol !== 'https:') return null;
+  if (u.hostname !== 'shipping.fuzzyreporting.com' &&
+      !u.hostname.startsWith('fww-shipping-bridge.')) return null;
+  return u;
+}
+
 // WHAT: identifies packing-slip / pick-list render URLs so setWindowOpenHandler can
 // intercept and print them instead of opening a visible window.
 // CHANGE-GUARD: if the bridge's slip-render path changes, update this matcher or slip
 // printing/saving silently breaks (the window would open visibly instead).
 function isSlipRenderUrl(url) {
-  return url.includes('/slip-render') || url.includes('slip-render');
+  const u = trustedPrintViewUrl(url);
+  // Path boundary: /slip-render or /slip-render/…, never /slip-renderX — and pathname
+  // can't carry the query string, so /account?next=/slip-render can't smuggle a match.
+  return !!u && /^\/slip-render(?:\/|$)/.test(u.pathname);
 }
 
 // SLIP PRINT ROUTER. Three branches by URL/settings:
@@ -535,7 +575,11 @@ function handleSlipPrint(slipUrl) {
 // routes to the LABEL printer (Rollo) at 4×6.
 
 function isLabelPrintViewUrl(url) {
-  return url.includes('/label/print-view') || url.includes('/batch/print-view');
+  const u = trustedPrintViewUrl(url);
+  // SYNC: label/batch print-view path boundary — keep IDENTICAL to okPath in
+  // ipcMain.on('print:label-url'): if the bridge adds/renames a print-view route,
+  // update both or that route spools via one channel and not the other.
+  return !!u && /^\/(?:label|batch)\/print-view(?:\/|$)/.test(u.pathname);
 }
 
 function handleLabelPrint(labelUrl) {
@@ -1196,8 +1240,9 @@ ipcMain.on('print:slip-url', (event, payload) => {
 // cannot be dropped that way. Slips already had this bypass (print:slip-url above); batches did not.
 // Guarded because this arrives straight from the page: only ever hand handleLabelPrint a print-view
 // URL on the bridge host, so a compromised/odd page cannot drive the Rollo with an arbitrary URL.
-// DEPENDS: isLabelPrintViewUrl() defines which paths are eligible — the same predicate
-// setWindowOpenHandler uses, so both routes stay in lockstep by construction.
+// DEPENDS: the okPath boundary below and isLabelPrintViewUrl() (which guards the window.open
+// route the same way) must accept the same paths — marked SYNC at both sites — so both
+// routes stay in lockstep.
 // Payload is NOT destructured in the signature on purpose: a message sent with no second argument
 // would throw before any validation ran, inside a main-process IPC handler. New IPC surface, so it
 // hardens against a malformed send rather than trusting the intended caller.
@@ -1217,9 +1262,10 @@ ipcMain.on('print:label-url', (event, payload) => {
   const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
                       || (u.hostname.startsWith('fww-shipping-bridge.')
                           && u.hostname.endsWith('.workers.dev')));
-  // Match the PATHNAME, not the whole URL. isLabelPrintViewUrl() is a substring test, so
-  // /account?next=/label/print-view satisfies it — enough for a page to make the shell fetch and
-  // print an arbitrary same-host page. The path boundary keeps /label/print-viewX out too.
+  // Match the PATHNAME, not the whole URL, so /account?next=/label/print-view can't smuggle a
+  // print through the query string and /label/print-viewX stays out.
+  // SYNC: label/batch print-view path boundary — keep IDENTICAL to isLabelPrintViewUrl(),
+  // which guards the window.open route with this same regex.
   const okPath = !!u && /^\/(?:label|batch)\/print-view(?:\/|$)/.test(u.pathname);
   if (!u || u.protocol !== 'https:' || !okHost || !okPath) {
     console.warn('[fww-shell] refused print:label-url (not a bridge print-view URL):', JSON.stringify(url));
