@@ -281,7 +281,8 @@ function createMainWindow() {
 // NEW-WINDOW ROUTER. Decides what happens when the page opens a new window/tab:
 //   - TRUSTED slip-render URLs        -> intercepted, printed/saved by handleSlipPrint, window DENIED
 //   - TRUSTED label/batch print-views -> intercepted, printed by handleLabelPrint, window DENIED
-//   - shipping / Google accounts / bridge URLs -> ALLOWED (these are real auth popups)
+//   - TRUSTED shipping/bridge + Google / CF Access hosts -> ALLOWED as in-app popups
+//     (real auth popups; hostname-validated, see allowedAuthPopupUrl)
 //   - anything else -> opened in the system browser, window DENIED
 // "TRUSTED" = https + shipping/bridge host + exact path boundary (see trustedPrintViewUrl).
 // The print branches load their URL in an AUTHENTICATED hidden window (persist:shipping)
@@ -294,8 +295,9 @@ function createMainWindow() {
 // get hijacked into the external browser and auth breaks.
 // CHANGE-GUARD: TEST printing a packing slip (slip window must NOT pop visibly), a label
 // reprint, a fresh CF Access / Google sign-in (popup must open IN-APP, not in Chrome),
-// AND window.open('https://evil.example.com/slip-render') from DevTools — it must open in
-// the system browser, not print.
+// AND from DevTools: window.open('https://evil.example.com/slip-render') — system
+// browser, not print — and window.open('https://shipping.fuzzyreporting.com.evil.example/')
+// — system browser, never an in-app popup.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isSlipRenderUrl(url)) {
       handleSlipPrint(url);
@@ -309,22 +311,18 @@ function createMainWindow() {
       handleLabelPrint(url);
       return { action: 'deny' };
     }
-    if (url.startsWith('https://shipping.fuzzyreporting.com') ||
-        url.startsWith('https://accounts.google.com') ||
-        // CF Access team domain — the login flow 302s shipping.fuzzyreporting.com to
-        // https://<team>.cloudflareaccess.com/cdn-cgi/access/login/... When any step of that flow
-        // opens as a POPUP (a new window, which is all setWindowOpenHandler governs), this branch must
-        // catch it or the popup falls through to shell.openExternal() below — ejected to the system
-        // browser, where it CANNOT complete back into the app's persist:shipping session, so login
-        // silently dies. This bit ONLY out-of-org users (7/27: erin.m.karson@gmail.com, the sole
-        // non-@fuzzywumpets.com account): in-org Workspace logins flow as top-level redirects that
-        // setWindowOpenHandler never sees, while an external Google account gets an extra interstitial
-        // that opens as a popup and hit this gap. The team domain was never in the allow-list — a
-        // hardcoded dependency on the login flow's exact domains that silently omitted this one.
-        // Matches any <team>.cloudflareaccess.com so a team-domain rename can't re-break it.
-        /^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com\//i.test(url) ||
-        url.startsWith('https://fww-shipping-bridge.')) {
-      // Let auth popups open normally
+    // Own hosts + the two login providers, matched on PARSED hostname — see
+    // allowedAuthPopupUrl (which also carries the CF Access popup history). The old raw
+    // startsWith tests accepted registrable-domain lookalikes
+    // (https://shipping.fuzzyreporting.com.evil.example), userinfo tricks
+    // (https://shipping.fuzzyreporting.com@evil.example) and any
+    // https://fww-shipping-bridge.* string as in-app popups — the same
+    // substring-vs-URL-parse bug the print routes fixed (PR #7/#8/#9). No print or
+    // cookie exposure (SOP holds), but an in-app window dressed as ours is a phishing
+    // surface. A rejected URL falls through to shell.openExternal below — visible in
+    // the system browser, never silently dropped.
+    if (allowedAuthPopupUrl(url)) {
+      // Let auth popups open normally (in-app, so they can complete into persist:shipping)
       return { action: 'allow' };
     }
     // Other links open in the default browser — but ONLY real web links.
@@ -337,6 +335,8 @@ function createMainWindow() {
     // explicit allow-list above did NOT already claim — ordering matters, this must stay last.
     // Foreign lookalikes of the print routes (e.g. https://evil.com/slip-render) now deliberately
     // land here and open visibly in the system browser instead of being printed authenticated.
+    // Lookalikes of the allow-list hosts (shipping.fuzzyreporting.com.evil.example, userinfo@
+    // tricks, fww-shipping-bridge.attacker.example) land here too, instead of opening in-app.
     // DEPENDENCY CHECKED before narrowing this branch: the only callers that legitimately rely on it
     // are the Shopify admin deep-link (window.open('https://admin.shopify.com/...')) and carrier
     // tracking links — both http(s), so both still open exactly as before. Every in-app route
@@ -497,20 +497,54 @@ function injectPrintButton(wc) {
 // A URL that fails here is NOT dropped: setWindowOpenHandler falls through to the
 // allow-list (same-host popup) or shell.openExternal (system browser) — visible, and
 // printless either way.
-// SYNC: trusted print hosts — must accept exactly what setWindowOpenHandler's allow-list
-// accepts (the branch after the print branches: shipping.fuzzyreporting.com + any
-// https://fww-shipping-bridge. prefix) and what the print:label-url IPC guard's okHost
-// accepts (see ipcMain.on('print:label-url')). Compare on hostname, never .host:
-// .host carries :port, so a legitimate explicit-port URL would be refused here while the
-// allow-list accepted it — the print branch would silently stop intercepting on that
-// origin and print-views would open as visible popups instead of spooling.
+// SYNC: trusted shell hosts — ONE rule, four sites in lockstep: this function (used by
+// the window.open print predicates below AND, via allowedAuthPopupUrl, the popup
+// allow-list's own-host entries) plus the okHost checks in print:slip-url /
+// print:label-url. The rule: https + hostname exactly shipping.fuzzyreporting.com, or
+// an fww-shipping-bridge.*.workers.dev hostname — BOTH the prefix and the .workers.dev
+// suffix pinned, matching the IPC guards: prefix-only accepted registrable-domain
+// lookalikes (fww-shipping-bridge.attacker.example) into the authenticated print path
+// and the in-app popup allow-list. No legitimate bridge host exists outside
+// fww-shipping-bridge.*.workers.dev + shipping.fuzzyreporting.com itself.
+// Compare on hostname, never .host: .host carries :port, so a legitimate explicit-port
+// URL would be refused here while another site accepted it — the print branch would
+// silently stop intercepting on that origin and print-views would open as visible
+// popups instead of spooling.
 function trustedPrintViewUrl(url) {
   let u = null;
   try { u = new URL(String(url || '')); } catch (_) { return null; }
   if (u.protocol !== 'https:') return null;
   if (u.hostname !== 'shipping.fuzzyreporting.com' &&
-      !u.hostname.startsWith('fww-shipping-bridge.')) return null;
+      !(u.hostname.startsWith('fww-shipping-bridge.') &&
+        u.hostname.endsWith('.workers.dev'))) return null;
   return u;
+}
+
+// AUTH-POPUP ALLOW-LIST for setWindowOpenHandler: may this URL open as an in-app popup
+// window? Own hosts (exactly trustedPrintViewUrl's rule, so the print predicates and
+// the popup allow-list can never drift apart on what "our host" means) plus the two
+// login providers, all matched on parsed hostname — the raw-string prefixes this
+// replaces let https://accounts.google.com.evil.example and userinfo@ tricks open
+// in-app.
+// INVARIANT (see setWindowOpenHandler): accounts.google.com and the CF Access team
+// domain MUST stay accepted here or out-of-org login breaks. The login flow 302s
+// shipping.fuzzyreporting.com to https://<team>.cloudflareaccess.com/cdn-cgi/access/login/…,
+// and when a step of that flow opens as a POPUP (a new window — all setWindowOpenHandler
+// governs) it must open IN-APP: ejected to the system browser it cannot complete back
+// into the app's persist:shipping session, so login silently dies. That bit ONLY
+// out-of-org users (7/27: erin.m.karson@gmail.com, the sole non-@fuzzywumpets.com
+// account) — in-org Workspace logins flow as top-level redirects setWindowOpenHandler
+// never sees, while an external Google account gets an extra interstitial that opens as
+// a popup. Any single-label <team>.cloudflareaccess.com hostname is accepted so a
+// team-domain rename can't re-break it (live team domain, verified 2026-08-17 run:
+// fuzzywumpets.cloudflareaccess.com).
+function allowedAuthPopupUrl(url) {
+  if (trustedPrintViewUrl(url)) return true;
+  let u = null;
+  try { u = new URL(String(url || '')); } catch (_) { return false; }
+  if (u.protocol !== 'https:') return false;
+  return u.hostname === 'accounts.google.com'
+      || /^[a-z0-9-]+\.cloudflareaccess\.com$/i.test(u.hostname);
 }
 
 // WHAT: identifies packing-slip / pick-list render URLs so setWindowOpenHandler can
@@ -1207,13 +1241,13 @@ ipcMain.on('print:slip-url', (event, payload) => {
   // The base only kicks in for relative input ('/slip-render?…' → bridge URL); an absolute
   // raw ignores it, so a foreign absolute URL cannot "borrow" the bridge origin here.
   try { u = new URL(raw, 'https://shipping.fuzzyreporting.com'); } catch (_) { u = null; }
-  // SYNC: bridge origins — keep in lockstep with setWindowOpenHandler's allow-list (~L303) and
-  // with the identical check in print:label-url below. The window-open route allows any
-  // https://fww-shipping-bridge.* prefix; here the workers.dev SUFFIX is pinned too, a deliberate
-  // strict subset: prefix-only accepts registrable-domain lookalikes
-  // (fww-shipping-bridge.attacker.example) and prints them through the authenticated hidden
-  // window. No legitimate bridge host exists outside fww-shipping-bridge.*.workers.dev + the
-  // custom domain, so the only URLs this refuses that window-open would allow were never ours.
+  // SYNC: bridge origins — keep in lockstep with trustedPrintViewUrl() (which guards the
+  // window.open print predicates AND, via allowedAuthPopupUrl, the popup allow-list's
+  // own-host entries) and with the identical check in print:label-url below. Every site
+  // pins BOTH the fww-shipping-bridge. prefix AND the .workers.dev suffix: prefix-only
+  // accepted registrable-domain lookalikes (fww-shipping-bridge.attacker.example) through
+  // the authenticated hidden window. No legitimate bridge host exists outside
+  // fww-shipping-bridge.*.workers.dev + the custom domain.
   // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
   // while the window-open route accepted it — silently re-breaking slip printing on that origin only.
   const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
@@ -1250,13 +1284,13 @@ ipcMain.on('print:label-url', (event, payload) => {
   const url = String((payload && payload.url) || '');
   let u = null;
   try { u = new URL(url); } catch (_) { u = null; }
-  // SYNC: bridge origins — keep in lockstep with setWindowOpenHandler's allow-list (~L303) and
-  // with the identical check in print:slip-url above. The window-open route allows any
-  // https://fww-shipping-bridge.* prefix; here the workers.dev SUFFIX is pinned too, a deliberate
-  // strict subset: prefix-only accepts registrable-domain lookalikes
-  // (fww-shipping-bridge.attacker.example) and prints them through the authenticated hidden
-  // window. No legitimate bridge host exists outside fww-shipping-bridge.*.workers.dev + the
-  // custom domain, so the only URLs this refuses that window-open would allow were never ours.
+  // SYNC: bridge origins — keep in lockstep with trustedPrintViewUrl() (which guards the
+  // window.open print predicates AND, via allowedAuthPopupUrl, the popup allow-list's
+  // own-host entries) and with the identical check in print:slip-url above. Every site
+  // pins BOTH the fww-shipping-bridge. prefix AND the .workers.dev suffix: prefix-only
+  // accepted registrable-domain lookalikes (fww-shipping-bridge.attacker.example) through
+  // the authenticated hidden window. No legitimate bridge host exists outside
+  // fww-shipping-bridge.*.workers.dev + the custom domain.
   // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
   // while the window-open route accepted it — silently re-breaking spooling on that origin only.
   const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
