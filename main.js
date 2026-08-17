@@ -5,10 +5,36 @@ const {
   session, shell, dialog, nativeTheme, systemPreferences
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const Store = require('electron-store').default || require('electron-store');
+// electron-store v8 is plain CJS: require() returns the ElectronStore class
+// directly. Do NOT "interop" this with `.default ||` — ElectronStore extends
+// conf's Conf class, and conf's compiled CJS attaches `default` as a static on
+// the class, so `.default` resolves to that INHERITED static = the raw Conf
+// class. Constructing raw Conf skips ElectronStore's app-aware path resolution
+// (and ignores the `name` option), which is exactly how every build before
+// 1.0.20 wrote its config to the machine-shared
+// %APPDATA%\electron-store-nodejs\Config\config.json instead of userData.
+const Store = require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+
+// ─── Test/dev isolation hook ─────────────────────────────────────────────────
+// FWW_SHIPPING_USERDATA_DIR (absolute path) relocates ALL persistent state —
+// the settings store, the persist:shipping cookie jar, caches, AND the
+// single-instance lock — BEFORE anything touches it. A sandboxed run is fully
+// isolated from the real install and can coexist with a running production
+// instance (the single-instance lock is scoped to userData). Sandboxed runs
+// also start with CLEAN settings by design: they never inherit the machine's
+// real printers (see migrateLegacyFallbackConfig), so a test can't silently
+// spool to real hardware the way the 2026-08-17 harness incident did.
+// DEPENDS: this must run before requestSingleInstanceLock, before the Store
+// construction below, and before any session/partition use — do not move it
+// below those.
+if (process.env.FWW_SHIPPING_USERDATA_DIR) {
+  const sandboxDir = path.resolve(process.env.FWW_SHIPPING_USERDATA_DIR);
+  app.setPath('userData', sandboxDir);
+  app.setPath('sessionData', sandboxDir);
+}
 
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
@@ -45,6 +71,18 @@ const ICON_PATH    = path.join(__dirname, 'assets', 'icon.png');
 // (it just falls back to its default).
 const store = new Store({
   name: 'config',
+  // Belt-and-suspenders: pin the store file to THIS app's userData dir with an
+  // absolute cwd, which ElectronStore AND raw Conf both honor as-is. Every
+  // build before 1.0.20 accidentally constructed raw Conf (see the require
+  // note at the top of this file) and so wrote config to the machine-SHARED
+  // %APPDATA%\electron-store-nodejs\Config\config.json from the very first run
+  // (2026-06-22) — shared with any other electron-store app on the machine,
+  // and silently inherited by dev/test runs (which is how a test harness
+  // printed junk pages on the real studio Canon on 2026-08-17). The explicit
+  // cwd makes the storage path deterministic no matter which class a future
+  // refactor ends up loading. Existing settings are carried over by
+  // migrateLegacyFallbackConfig() below.
+  cwd: app.getPath('userData'),
   defaults: {
     printSettings: {
       labelPrinter:     null,   // system printer name for shipping labels
@@ -60,6 +98,62 @@ const store = new Store({
     windowBounds: { width: 1280, height: 900 },
   },
 });
+
+// ─── One-time migration from the shared legacy store ─────────────────────────
+// Every build before 1.0.20 wrote its settings to the machine-shared fallback
+// file (see the cwd note above), so the configured printers live THERE on every
+// existing install. Carry them to the new per-app path exactly once. Rules:
+//   - the legacy file is NEVER modified or deleted: other apps could share it,
+//     and a rolled-back 1.0.19 install must still find its settings intact
+//   - a legacy value is adopted only while the new store still holds the
+//     pristine construction default for that key — a value the user set at the
+//     new path (or later cleared; hence the one-shot marker) is never
+//     overwritten or resurrected
+//   - sandboxed runs (FWW_SHIPPING_USERDATA_DIR) never read machine state:
+//     they migrate only from an explicitly injected FWW_SHIPPING_LEGACY_CONFIG_FILE
+//     fixture, so a fresh test sandbox cannot inherit the real printers
+//   - failures never block startup — worst case the app starts on defaults and
+//     the user re-picks printers in Print Settings
+// DEPENDS: the "pristine default" checks below mirror the `defaults` object in
+// the Store construction above (labelPrinter/slipPrinter null; windowBounds
+// without x/y). If those defaults change shape, update these checks in the same
+// change or migration will adopt/skip wrongly.
+const LEGACY_MIGRATED_KEY = '__legacyFallbackMigrated';
+function migrateLegacyFallbackConfig() {
+  try {
+    if (store.get(LEGACY_MIGRATED_KEY)) return;
+    const sandboxed      = !!process.env.FWW_SHIPPING_USERDATA_DIR;
+    const legacyOverride = process.env.FWW_SHIPPING_LEGACY_CONFIG_FILE;
+    if (sandboxed && !legacyOverride) {
+      store.set(LEGACY_MIGRATED_KEY, true);
+      return;
+    }
+    const legacyFile = legacyOverride
+      || path.join(app.getPath('appData'), 'electron-store-nodejs', 'Config', 'config.json');
+    if (!fs.existsSync(legacyFile)) {
+      store.set(LEGACY_MIGRATED_KEY, true);
+      return;
+    }
+    const legacy = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+    const cur = store.get('printSettings');
+    if (cur && cur.labelPrinter == null && cur.slipPrinter == null
+        && legacy.printSettings && typeof legacy.printSettings === 'object') {
+      // Legacy wins for the keys it has; keys added after the legacy era keep
+      // their defaults.
+      store.set('printSettings', { ...cur, ...legacy.printSettings });
+    }
+    const wb = store.get('windowBounds');
+    if (wb && wb.x === undefined
+        && legacy.windowBounds && typeof legacy.windowBounds === 'object') {
+      store.set('windowBounds', legacy.windowBounds);
+    }
+    store.set(LEGACY_MIGRATED_KEY, true);
+    console.log('[fww-config] settings migrated from legacy shared store:', legacyFile);
+  } catch (e) {
+    console.error('[fww-config] legacy settings migration failed:', e?.message || e);
+  }
+}
+migrateLegacyFallbackConfig();
 
 // ─── Single instance lock ─────────────────────────────────────────────────────
 

@@ -55,7 +55,20 @@ to the label printer. Packing slips open a `/slip-render` page whose
 `window.print()` is intercepted and routed to the slip printer instead.
 
 Settings are stored **per machine** via `electron-store` at
-`%APPDATA%/fww-shipping-desktop/config.json`.
+`%APPDATA%/fww-shipping-desktop/config.json` (pinned explicitly via the store's
+`cwd` option since 1.0.20 — before that, electron-store's own app detection
+silently fell back to the machine-**shared**
+`%APPDATA%/electron-store-nodejs/Config/config.json`, on dev *and* installed
+builds alike). On first launch, 1.0.20+ migrates settings out of that legacy
+file exactly once; the legacy file itself is never modified or deleted.
+
+For sandboxed dev/test runs, two env vars isolate the app from the real
+install: `FWW_SHIPPING_USERDATA_DIR` (absolute path) relocates **all**
+persistent state — settings, the `persist:shipping` cookie jar, caches, and the
+single-instance lock, so a test run coexists with a running production
+instance — and starts with clean settings (no inherited real printers).
+`FWW_SHIPPING_LEGACY_CONFIG_FILE` optionally points migration at a fixture
+file for testing the migration itself.
 
 ---
 
