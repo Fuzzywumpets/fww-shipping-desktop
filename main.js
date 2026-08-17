@@ -1163,12 +1163,18 @@ ipcMain.on('print:slip-url', (event, payload) => {
   // The base only kicks in for relative input ('/slip-render?…' → bridge URL); an absolute
   // raw ignores it, so a foreign absolute URL cannot "borrow" the bridge origin here.
   try { u = new URL(raw, 'https://shipping.fuzzyreporting.com'); } catch (_) { u = null; }
-  // SYNC: bridge origins — must accept exactly what setWindowOpenHandler's allow-list accepts
-  // (main.js ~L303: shipping.fuzzyreporting.com, and any https://fww-shipping-bridge. prefix).
+  // SYNC: bridge origins — keep in lockstep with setWindowOpenHandler's allow-list (~L303) and
+  // with the identical check in print:label-url below. The window-open route allows any
+  // https://fww-shipping-bridge.* prefix; here the workers.dev SUFFIX is pinned too, a deliberate
+  // strict subset: prefix-only accepts registrable-domain lookalikes
+  // (fww-shipping-bridge.attacker.example) and prints them through the authenticated hidden
+  // window. No legitimate bridge host exists outside fww-shipping-bridge.*.workers.dev + the
+  // custom domain, so the only URLs this refuses that window-open would allow were never ours.
   // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
   // while the window-open route accepted it — silently re-breaking slip printing on that origin only.
   const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
-                      || u.hostname.startsWith('fww-shipping-bridge.'));
+                      || (u.hostname.startsWith('fww-shipping-bridge.')
+                          && u.hostname.endsWith('.workers.dev')));
   // Match the PATHNAME, not the whole URL. isSlipRenderUrl() is a substring test, so
   // /account?next=/slip-render satisfies it — enough for a page to make the shell fetch and
   // print an arbitrary same-host page. The path boundary keeps /slip-renderX out too.
@@ -1199,12 +1205,18 @@ ipcMain.on('print:label-url', (event, payload) => {
   const url = String((payload && payload.url) || '');
   let u = null;
   try { u = new URL(url); } catch (_) { u = null; }
-  // SYNC: bridge origins — must accept exactly what setWindowOpenHandler's allow-list accepts
-  // (main.js ~L303: shipping.fuzzyreporting.com, and any https://fww-shipping-bridge. prefix).
+  // SYNC: bridge origins — keep in lockstep with setWindowOpenHandler's allow-list (~L303) and
+  // with the identical check in print:slip-url above. The window-open route allows any
+  // https://fww-shipping-bridge.* prefix; here the workers.dev SUFFIX is pinned too, a deliberate
+  // strict subset: prefix-only accepts registrable-domain lookalikes
+  // (fww-shipping-bridge.attacker.example) and prints them through the authenticated hidden
+  // window. No legitimate bridge host exists outside fww-shipping-bridge.*.workers.dev + the
+  // custom domain, so the only URLs this refuses that window-open would allow were never ours.
   // Compare on hostname, never .host: .host carries :port, so a legitimate URL would be refused here
   // while the window-open route accepted it — silently re-breaking spooling on that origin only.
   const okHost = !!u && (u.hostname === 'shipping.fuzzyreporting.com'
-                      || u.hostname.startsWith('fww-shipping-bridge.'));
+                      || (u.hostname.startsWith('fww-shipping-bridge.')
+                          && u.hostname.endsWith('.workers.dev')));
   // Match the PATHNAME, not the whole URL. isLabelPrintViewUrl() is a substring test, so
   // /account?next=/label/print-view satisfies it — enough for a page to make the shell fetch and
   // print an arbitrary same-host page. The path boundary keeps /label/print-viewX out too.
