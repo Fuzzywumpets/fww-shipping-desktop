@@ -111,6 +111,26 @@ auto-updater consumes.
 That's it — labels auto-print to the Rollo on purchase, slips print to the Canon
 when triggered, all in the background.
 
+### Machine-wide install — do not revert to per-user
+
+The installer is built **per-machine** (`nsis.perMachine: true`): it installs to
+`C:\Program Files\FWW Shipping` and creates **all-users** Start-menu and Public
+Desktop shortcuts, so every Windows account on the PC gets the app from a single
+elevated install. This matters on shared shipping machines where operators
+(Mason, Erin, …) log in under their own accounts.
+
+**Every future build must keep `nsis.perMachine: true`.** Flipping it back to
+`false` produces a `oneClick` per-user installer, which:
+
+- silently installs into only the invoking user's `%LOCALAPPDATA%\Programs`,
+- offers **no** "install for all users" prompt at all (a `oneClick` installer
+  has no UI to click), and
+- leaves every other account on the machine without the app.
+
+That is the exact failure this setting fixes — it is load-bearing, not cosmetic.
+Because `package.json` is JSON and cannot carry a `DEPENDS:` comment, this note
+is the marker.
+
 ---
 
 ## Files
