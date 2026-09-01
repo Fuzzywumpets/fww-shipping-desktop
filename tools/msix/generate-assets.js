@@ -14,9 +14,15 @@
 // native module. (`winapp manifest update-assets` would also work on Windows, but it rewrites
 // the manifest as a side effect and only runs on Windows.)
 //
-// EVERY size here is SQUARE, deliberately. A wide tile (Wide310x150Logo) would require
-// letterboxing a square mark onto a 2:1 canvas, i.e. inventing composition that is not in the
-// approved icon. The wide tile is optional in the manifest, so it is simply not declared.
+// EVERY size here is SQUARE, deliberately: a wide tile (Wide310x150Logo) would mean
+// letterboxing a square mark onto a 2:1 canvas.
+//
+// That choice is COUPLED to the manifest. MakeAppx rejects a package whose uap:DefaultTile
+// declares Square310x310Logo without Wide310x150Logo (0x80080204) — an earlier revision
+// generated a 310x310 tile, declared it, shipped no wide tile, and failed to package on
+// Windows. So neither 310 tile exists: no Square310x310Logo asset, no Square310x310Logo
+// attribute. If a large tile is ever wanted, BOTH must be added together — a wide asset here
+// AND both attributes in the template. generate-manifest.js enforces the pairing.
 //
 // SYNC: the file names produced here must match the Assets\* paths referenced in
 // build/msix/Package.appxmanifest.template. tools/msix/stage-layout.js re-reads the generated
@@ -38,7 +44,6 @@ const BASE_LOGOS = [
   { name: 'Square44x44Logo', size: 44 },
   { name: 'Square71x71Logo', size: 71 },
   { name: 'Square150x150Logo', size: 150 },
-  { name: 'Square310x310Logo', size: 310 },
 ];
 
 // The app-list / taskbar / Start icon is resolved by targetsize rather than scale. The

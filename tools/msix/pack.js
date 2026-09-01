@@ -21,6 +21,7 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { resolveWinappLauncher, WinappNotInstalledError } = require('./winapp-launcher');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const LAYOUT = path.join(REPO_ROOT, 'dist', 'msix', 'layout');
@@ -44,22 +45,30 @@ function assertWindows() {
   }
 }
 
-function winappBin() {
-  const bin = path.join(TOOLS_DIR, 'node_modules', '.bin', process.platform === 'win32' ? 'winapp.cmd' : 'winapp');
-  if (!fs.existsSync(bin)) {
-    console.error(
-      '[msix:pack] winapp CLI not installed.\n' +
-      '           Run: npm run msix:tools   (npm ci --prefix build/msix)\n' +
-      `           Expected: ${path.relative(REPO_ROOT, bin)}`
-    );
-    process.exit(4);
+// Resolve `node <winappcli>/dist/cli.js` rather than the node_modules/.bin/winapp.cmd shim —
+// Node refuses to spawn a .cmd without shell:true (EINVAL), and shell:true would re-parse
+// every argument through cmd.exe. See tools/msix/winapp-launcher.js for the full reasoning.
+function winappLauncher() {
+  try {
+    return resolveWinappLauncher({ toolsDir: TOOLS_DIR });
+  } catch (err) {
+    if (err instanceof WinappNotInstalledError) {
+      console.error(`[msix:pack] ${err.message}`);
+      process.exit(4);
+    }
+    throw err;
   }
-  return bin;
 }
 
-function run(bin, args) {
+function run(launcher, args) {
   console.log(`[msix:pack] $ winapp ${args.join(' ')}`);
-  const r = spawnSync(bin, args, { stdio: 'inherit', cwd: REPO_ROOT, shell: false });
+  // shell:false with a real argv array: arguments containing spaces (the layout path, and
+  // "FWW Shipping.exe") are passed through verbatim with no quoting and no shell parsing.
+  const r = spawnSync(launcher.command, [...launcher.prefixArgs, ...args], {
+    stdio: 'inherit',
+    cwd: REPO_ROOT,
+    shell: false,
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`winapp ${args[0]} exited with code ${r.status}`);
@@ -89,7 +98,7 @@ function main() {
   }
 
   assertWindows();
-  const bin = winappBin();
+  const launcher = winappLauncher();
 
   const xml = fs.readFileSync(MANIFEST, 'utf8');
   const version = readManifestValue(xml, 'Version');
@@ -122,7 +131,7 @@ function main() {
     // the manifest rather than from a name typed twice.
     if (!fs.existsSync(DEV_CERT)) {
       console.log(`[msix:pack] generating development certificate for ${publisher}`);
-      run(bin, [
+      run(launcher, [
         'cert', 'generate',
         '--manifest', path.relative(REPO_ROOT, MANIFEST),
         '--output', path.relative(REPO_ROOT, DEV_CERT),
@@ -135,7 +144,7 @@ function main() {
     packArgs.push('--cert', path.relative(REPO_ROOT, DEV_CERT));
   }
 
-  run(bin, packArgs);
+  run(launcher, packArgs);
 
   if (!fs.existsSync(output)) {
     // winapp may apply its own <name>_<version>_<arch>.msix naming; report what actually

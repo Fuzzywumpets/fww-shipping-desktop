@@ -44,12 +44,14 @@ const UPDATE_CHANNELS = Object.freeze({
 
 const VALID_OVERRIDES = new Set([CHANNEL_GITHUB, CHANNEL_STORE, CHANNEL_DEV]);
 
-// TEST SEAM: FWW_UPDATE_CHANNEL=store|github|dev forces a channel. This exists so the Store
-// branch (the "Windows manages updates" dialog, and the absence of any GitHub traffic) can be
-// exercised on a normal dev machine BEFORE a package is ever accepted by Partner Center —
-// there is otherwise no way to make process.windowsStore true. Unrecognised values are
-// ignored rather than throwing, so a typo degrades to normal detection instead of bricking
-// startup.
+// TEST SEAM: FWW_UPDATE_CHANNEL=store|github|dev forces a channel on a NON-Store process.
+// This exists so the Store branch (the "Windows manages updates" dialog, and the absence of
+// any GitHub traffic) can be exercised on a normal dev machine BEFORE a package is ever
+// accepted by Partner Center — there is otherwise no way to make process.windowsStore true.
+// Unrecognised values are ignored rather than throwing, so a typo degrades to normal
+// detection instead of bricking startup.
+//
+// It deliberately CANNOT override a real Store build — see resolveUpdateChannel below.
 function normalizeOverride(raw) {
   if (typeof raw !== 'string') return null;
   const value = raw.trim().toLowerCase();
@@ -60,10 +62,17 @@ function normalizeOverride(raw) {
 // so tests can drive every combination.
 //
 // Ordering is load-bearing:
-//   1. An explicit override always wins (that is the whole point of the test seam).
-//   2. windowsStore beats everything else. A Store build is also `isPackaged`, so if this
-//      came after the packaged check a Store build would be classified 'github' and would
-//      arm the GitHub updater — the exact failure this module prevents.
+//   1. windowsStore === true -> 'store', UNCONDITIONALLY, ahead of the override.
+//      "A Store build never contacts or applies a GitHub update" is a hard invariant, not a
+//      default, so nothing in the environment may switch it off. An inherited or stale
+//      FWW_UPDATE_CHANNEL=github — set once for testing and left in a user or machine
+//      environment, or inherited from a parent process — would otherwise arm electron-updater
+//      inside a real Store package, which is precisely the failure this module exists to
+//      prevent. The seam only ever needs to SIMULATE store on a non-Store process; it never
+//      needs to turn a genuine Store build into a GitHub one, so it does not get to.
+//      This check is also ahead of the isPackaged check, because a Store build is packaged
+//      too and would otherwise classify as 'github'.
+//   2. An explicit override wins for every non-Store process (the test seam).
 //   3. Not packaged -> 'dev'.
 //   4. Otherwise -> 'github'.
 //
@@ -72,12 +81,12 @@ function normalizeOverride(raw) {
 function resolveUpdateChannel(input) {
   const { isPackaged, windowsStore, override } = input || {};
 
-  const forced = normalizeOverride(override);
-  if (forced) return forced;
-
   // process.windowsStore is `true` in an appx/MSIX build and `undefined` otherwise, so
   // compare strictly rather than relying on truthiness of an absent property.
   if (windowsStore === true) return CHANNEL_STORE;
+
+  const forced = normalizeOverride(override);
+  if (forced) return forced;
 
   if (!isPackaged) return CHANNEL_DEV;
 

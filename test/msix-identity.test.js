@@ -15,7 +15,11 @@ const {
   validatePackageVersion,
   resolveIdentity,
 } = require('../tools/msix/msix-identity');
-const { generate, assertXmlCommentsValid } = require('../tools/msix/generate-manifest');
+const {
+  generate,
+  assertXmlCommentsValid,
+  assertTilePairing,
+} = require('../tools/msix/generate-manifest');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const REAL_PKG = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
@@ -169,6 +173,36 @@ test('the real template renders with no placeholders left and is well-formed eno
     'the manifest must never place the app in an AppContainer'
   );
   assert.ok(!/TrustLevel/.test(declarations), 'no uap10:TrustLevel attribute is expected');
+});
+
+test('a large square tile without a wide tile is caught before MakeAppx sees it', () => {
+  // Regression: the manifest declared Square310x310Logo while deliberately shipping no wide
+  // tile. MakeAppx rejects that pairing (0x80080204) — but only after a full Electron build
+  // on a Windows box, so the feedback loop was ~10 minutes and a machine away.
+  assert.throws(
+    () => assertTilePairing('<uap:DefaultTile Square310x310Logo="Assets\\A.png" />'),
+    /Wide310x150Logo/
+  );
+  assert.doesNotThrow(
+    () => assertTilePairing('<uap:DefaultTile Square71x71Logo="Assets\\A.png" />')
+  );
+  assert.doesNotThrow(
+    () => assertTilePairing(
+      '<uap:DefaultTile Square310x310Logo="Assets\\A.png" Wide310x150Logo="Assets\\W.png" />'
+    )
+  );
+  // A wide tile on its own is fine; only the large square one carries the requirement.
+  assert.doesNotThrow(
+    () => assertTilePairing('<uap:DefaultTile Wide310x150Logo="Assets\\W.png" />')
+  );
+  assert.doesNotThrow(() => assertTilePairing('<Package />'));
+});
+
+test('the real template satisfies the MakeAppx tile pairing rule', () => {
+  const template = fs.readFileSync(
+    path.join(REPO_ROOT, 'build', 'msix', 'Package.appxmanifest.template'), 'utf8'
+  );
+  assert.doesNotThrow(() => assertTilePairing(template));
 });
 
 test('a double dash inside an XML comment is caught before makeappx sees it', () => {

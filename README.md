@@ -235,6 +235,12 @@ To exercise the Store branch on a normal dev machine, without a Store package:
 $env:FWW_UPDATE_CHANNEL='store'; npm start
 ```
 
+`FWW_UPDATE_CHANNEL` only affects a **non-Store** process. `process.windowsStore === true`
+resolves to the Store channel unconditionally, ahead of the override: "a Store build never
+contacts GitHub" is a hard invariant, so a stale or inherited `FWW_UPDATE_CHANNEL=github` left
+in a machine or user environment cannot arm `electron-updater` inside a signed, read-only Store
+package. The seam only ever needs to *simulate* Store on a normal process.
+
 ### Settings and login continuity
 
 `app.getPath('userData')` returns the same `%APPDATA%\fww-shipping-desktop` path in both

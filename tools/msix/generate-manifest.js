@@ -63,6 +63,28 @@ function assertXmlCommentsValid(xml) {
   }
 }
 
+// MakeAppx enforces tile pairings that the XSD does not. Checking them here turns a packaging
+// failure on a Windows box (error 0x80080204, discovered only after a full Electron build)
+// into an instant local failure with the fix in the message.
+//
+// Rule: <uap:DefaultTile> may declare Square310x310Logo ONLY alongside Wide310x150Logo.
+// A large square tile with no wide tile is rejected outright.
+function assertTilePairing(xml) {
+  const tile = /<uap:DefaultTile\b[^>]*\/?>/.exec(xml);
+  if (!tile) return;
+  const hasLargeSquare = /\bSquare310x310Logo=/.test(tile[0]);
+  const hasWide = /\bWide310x150Logo=/.test(tile[0]);
+  if (hasLargeSquare && !hasWide) {
+    throw new Error(
+      'uap:DefaultTile declares Square310x310Logo without Wide310x150Logo. MakeAppx rejects ' +
+      'this pairing (0x80080204: "The DefaultTile element must specify the Wide310x150Logo ' +
+      'attribute if the Square310x310Logo attribute is specified"). Either add a ' +
+      'Wide310x150Logo asset (310x150, not a square crop) or drop Square310x310Logo from ' +
+      'build/msix/Package.appxmanifest.template.'
+    );
+  }
+}
+
 function parseArgs(argv) {
   const args = { store: false, out: DEFAULT_OUT };
   for (let i = 0; i < argv.length; i += 1) {
@@ -116,6 +138,7 @@ function generate({ store, out }) {
   }
 
   assertXmlCommentsValid(rendered);
+  assertTilePairing(rendered);
 
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, rendered, 'utf8');
@@ -154,4 +177,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { generate, escapeXml, assertXmlCommentsValid };
+module.exports = { generate, escapeXml, assertXmlCommentsValid, assertTilePairing };

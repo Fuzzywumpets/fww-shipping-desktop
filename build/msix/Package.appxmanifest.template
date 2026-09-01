@@ -94,9 +94,20 @@
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">
+        <!--
+          DO NOT add Square310x310Logo here without also adding Wide310x150Logo. MakeAppx
+          enforces the pair and rejects the package outright:
+            "The DefaultTile element must specify the Wide310x150Logo attribute if the
+             Square310x310Logo attribute is specified" (0x80080204)
+          An earlier revision declared the large square tile while deliberately shipping no
+          wide tile, and packaging failed on Windows. Both tiles are optional for a desktop
+          app that is launched from the app list rather than a pinned Start tile, so the large
+          square one is simply not declared. tools/msix/generate-manifest.js re-checks this
+          rule at generation time, so re-adding one without the other fails locally instead of
+          in MakeAppx.
+        -->
         <uap:DefaultTile
-          Square71x71Logo="Assets\Square71x71Logo.png"
-          Square310x310Logo="Assets\Square310x310Logo.png" />
+          Square71x71Logo="Assets\Square71x71Logo.png" />
       </uap:VisualElements>
     </Application>
   </Applications>
