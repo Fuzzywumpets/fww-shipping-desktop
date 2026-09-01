@@ -11,6 +11,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 //   print:label-pdf       -> main.js ipcMain.on('print:label-pdf')     (silentPrintPdfBuffer)
 //   print:slip-url        -> main.js ipcMain.on('print:slip-url')     (handleSlipPrint)
 //   print:label-url       -> main.js ipcMain.on('print:label-url')    (handleLabelPrint)
+//   print:label-png       -> main.js ipcMain.on('print:label-png')    (printLabelPngLocally)
 //   print:status  (recv)  -> main.js mainWindow.webContents.send('print:status', ...)
 //   updater:status (recv) -> main.js autoUpdater 'update-available'/'update-downloaded' handlers
 contextBridge.exposeInMainWorld('__fwwDesktop', {
@@ -38,6 +39,11 @@ contextBridge.exposeInMainWorld('__fwwDesktop', {
   // DEPENDS: assets/ui.html openAuthed() feature-detects this by name before falling back to
   // window.open(), so an older shell keeps working; renaming it silently restores the 2026-08-12 bug.
   printLabelUrl: (url) => ipcRenderer.send('print:label-url', { url }),
+
+  // DEPENDS: assets/ui.html printLabelFast() feature-detects this exact name and sends the
+  // payload contract validated by label-print.js. This is single-label only; batches retain
+  // printLabelUrl because they contain multiple label images.
+  printLabelPng: (payload) => ipcRenderer.send('print:label-png', payload),
 
   // Listen for print status events from main
   onPrintStatus: (cb) => {

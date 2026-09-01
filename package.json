@@ -1,11 +1,12 @@
 {
   "name": "fww-shipping-desktop",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Fuzzywumpets Shipping — desktop app with background printing",
   "author": "Fuzzywumpets",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "node --test test/*.test.js",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win --dir",
     "postinstall": "electron-builder install-app-deps"
@@ -56,6 +57,7 @@
     },
     "files": [
       "main.js",
+      "label-print.js",
       "fww-logsink.cjs",
       "preload.js",
       "print-manager.html",
