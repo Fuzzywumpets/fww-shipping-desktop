@@ -14,6 +14,19 @@ build/msix/node_modules/
 *.cer
 *.pvk
 
+# `winapp cert generate` writes its OWN .gitignore next to the certificate it
+# creates (a two-line file listing devcert.pfx), so a documented clean dev build
+# — npm run dist:msix — used to leave the tree dirty with an untracked file.
+#
+# Ignored rather than committed, deliberately. Its contents are entirely redundant
+# with the *.pfx rule above, so tracking it protects nothing; and it is generated
+# ONLY on Windows by a tool we pin but will eventually upgrade, so committing a
+# copy risks a line-ending or wording difference turning a harmless untracked file
+# into a permanently MODIFIED tracked one — a worse failure than the one being
+# fixed. Git still applies the rules inside an ignored .gitignore, so it keeps
+# working as the tool intends.
+build/msix/.gitignore
+
 # Generated packages. The MSIX artifacts land in dist/ (already ignored above);
 # these patterns catch a stray package built anywhere else in the tree.
 *.msix
