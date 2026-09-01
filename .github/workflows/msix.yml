@@ -1,0 +1,156 @@
+name: MSIX (Microsoft Store) validation
+
+# DELIBERATELY SEPARATE from build.yml.
+#
+# build.yml is the production channel: it triggers on a `v*` tag and publishes the NSIS
+# installer + latest.yml to a GitHub Release, which electron-updater consumes. Nothing in this
+# file may run on that trigger, and nothing here creates, edits or uploads to a Release —
+# a half-finished Store package must never appear where the auto-updater can see it.
+#
+# This workflow is manual (workflow_dispatch) plus a PR sanity check, because the Partner
+# Center identity values do not exist yet: the Fuzzywumpets company account is awaiting
+# verification and the app name is not reserved. Until they do, the only artifact this can
+# produce is a development-signed package for local sideload testing.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dev = locally signed sideload package; store = unsigned Store artifact (needs the MSIX_* secrets)'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, store]
+  pull_request:
+    paths:
+      - 'build/msix/**'
+      - 'tools/msix/**'
+      - 'test/**'
+      - 'update-channel.js'
+      - 'package.json'
+      - '.github/workflows/msix.yml'
+
+# Read-only. This workflow must never be able to touch a Release.
+permissions:
+  contents: read
+
+jobs:
+  # Cheap, cross-platform gate: the identity/version mapping, the channel split and the
+  # manifest render are all pure Node and need neither Windows nor a build.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax check entry points
+        run: node --check main.js && node --check preload.js && node --check update-channel.js && node --check fww-logsink.cjs
+      - name: Unit tests (update channel + MSIX identity)
+        run: npm test
+      - name: Generate development manifest
+        run: npm run msix:manifest
+      - name: Store manifest must refuse the development placeholders
+        shell: bash
+        run: |
+          if npm run msix:manifest:store; then
+            echo "::error::msix:manifest:store succeeded with development placeholder identity values"
+            exit 1
+          fi
+          echo "OK: store mode correctly refused the development placeholders"
+
+  msix:
+    # workflow_dispatch only: the full Electron build plus MSIX packaging is far too slow to
+    # run on every PR, and it needs a Windows runner for makeappx/signtool.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install pinned winapp CLI
+        # npm ci --prefix build/msix, against the committed build/msix/package-lock.json.
+        # Never a bare `npx winapp` — that would silently float to whatever version npm
+        # resolves on the day, which is not a reproducible build.
+        run: npm run msix:tools
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build production layout (electron-builder --dir)
+        run: npm run dist:dir
+
+      - name: Build MSIX
+        env:
+          # Supplied only for a Store run. Until Partner Center verification completes these
+          # secrets do not exist, and `mode: store` will fail loudly rather than emit a
+          # package with placeholder identity — which is the intended behaviour.
+          MSIX_IDENTITY_NAME: ${{ secrets.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ secrets.MSIX_PUBLISHER_DISPLAY_NAME }}
+          MSIX_DISPLAY_NAME: ${{ secrets.MSIX_DISPLAY_NAME }}
+        run: |
+          if ('${{ inputs.mode }}' -eq 'store') {
+            npm run msix:manifest:store
+            npm run msix:stage
+            node tools/msix/pack.js --store
+          } else {
+            npm run msix:manifest
+            npm run msix:stage
+            node tools/msix/pack.js --dev
+          }
+
+      - name: Validate package with the Windows SDK
+        shell: pwsh
+        run: |
+          # makeappx unpack round-trips the package and re-validates the manifest against the
+          # schema — the same validation the Store runs at ingestion, minus the policy checks.
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                 Where-Object { Test-Path (Join-Path $_.FullName 'x64\makeappx.exe') } |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) { Write-Error 'No Windows SDK with makeappx.exe found'; exit 1 }
+          $makeappx = Join-Path $sdk.FullName 'x64\makeappx.exe'
+          Write-Host "Using $makeappx"
+          $pkg = Get-ChildItem dist/msix/*.msix | Select-Object -First 1
+          & $makeappx unpack /p $pkg.FullName /d "$env:RUNNER_TEMP\msix-unpacked" /o /nv
+          if ($LASTEXITCODE -ne 0) { Write-Error 'makeappx unpack failed'; exit 1 }
+          Get-Content "$env:RUNNER_TEMP\msix-unpacked\AppxManifest.xml"
+
+      - name: Windows App Certification Kit
+        # WACK is the pre-submission check Microsoft runs. It is best-effort here: appcert.exe
+        # needs an installed package and elevation, and on a hosted runner it can be absent
+        # entirely. A failure here is reported, not fatal, because the authoritative run is on
+        # a real Windows machine before submission (see README "Store submission checklist").
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $appcert = 'C:\Program Files (x86)\Windows Kits\10\App Certification Kit\appcert.exe'
+          if (-not (Test-Path $appcert)) {
+            Write-Host '::warning::Windows App Certification Kit not present on this runner; run WACK manually before submission.'
+            exit 0
+          }
+          $pkg = Get-ChildItem dist/msix/*.msix | Select-Object -First 1
+          & $appcert reset
+          & $appcert test -appxpackagepath $pkg.FullName -reportoutputpath "$env:RUNNER_TEMP\wack.xml"
+
+      # CI artifact ONLY. This is not a release: a development-signed package is not
+      # installable by anyone who has not trusted our throwaway local certificate, and an
+      # unsigned Store package is not installable at all until Microsoft signs it.
+      - name: Upload MSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: msix-${{ inputs.mode }}
+          path: |
+            dist/msix/*.msix
+            dist/msix/Package.appxmanifest
+          if-no-files-found: error
+          retention-days: 14
