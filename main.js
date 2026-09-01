@@ -9,6 +9,8 @@ const Store = require('electron-store').default || require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
+const { buildLabelHtml, validateLabelPngPayload } = require('./label-print');
 
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
@@ -78,6 +80,24 @@ if (!gotLock) { app.quit(); process.exit(0); }
 
 let mainWindow        = null;
 let printManagerWindow = null;
+
+// Persistent phase telemetry for the money-to-printer path. Wall-clock timestamps help correlate
+// Worker/ShipEngine logs; elapsed_ms uses a monotonic clock so a bad Windows clock cannot corrupt the
+// duration. One JSON object per phase also preserves the last completed phase if Electron or the PC dies.
+function recordLabelPrintPhase(ctx, phase, extra = {}) {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const elapsedMs = Number(process.hrtime.bigint() - ctx.startedMono) / 1e6;
+    fs.appendFileSync(path.join(logDir, 'label-print-timing.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), print_id: ctx.printId, phase, elapsed_ms: Math.round(elapsedMs),
+      label_id: ctx.labelId, order: ctx.order || null, tracking: ctx.tracking || null,
+      renderer_sent_at: ctx.rendererSentAt, ...extra,
+    }) + '\n', 'utf8');
+  } catch (err) {
+    console.warn('[fww-print] could not write label timing log:', String(err));
+  }
+}
 let tray              = null;
 let quitting          = false;   // true when user explicitly quits
 
@@ -784,6 +804,133 @@ function printLabelViaPdf(url, settings) {
   win.loadURL(url);
 }
 
+// Single-label fast path. This deliberately prints a local raster page, never Chromium's PDF viewer:
+// the PDF viewer produced black/blank 4x6 output in v1.0.14-v1.0.16. Failures before print() is invoked
+// fall back to the proven authenticated /label/print-view route. Once print() is invoked we never
+// auto-fallback, because an ambiguous spooler callback could otherwise print the paid label twice.
+// DEPENDS: assets/ui.html printLabelFast() and preload.js printLabelPng() send the payload validated by
+// label-print.js. Keep the IPC name and payload fields synchronized across all four files.
+async function printLabelPngLocally(payload, settings) {
+  let input;
+  try { input = validateLabelPngPayload(payload); } catch (err) {
+    console.warn('[fww-print] refused print:label-png:', String(err));
+    mainWindow?.webContents.send('print:status', {
+      type: 'label', success: false, reason: String(err), timestamp: Date.now(),
+    });
+    return;
+  }
+
+  const ctx = {
+    printId: randomUUID(), startedMono: process.hrtime.bigint(), labelId: input.labelId,
+    order: input.order, tracking: input.tracking, rendererSentAt: input.rendererSentAt,
+  };
+  let win = null;
+  let settled = false;
+  let printInvoked = false;
+  let guard = null;
+  const phases = {};
+  const phase = (name, extra) => {
+    phases[name] = Math.round(Number(process.hrtime.bigint() - ctx.startedMono) / 1e6);
+    recordLabelPrintPhase(ctx, name, extra);
+  };
+  const destroy = () => setTimeout(() => {
+    try { win?.destroy(); } catch (_) {}
+    restoreMainFocus();
+  }, 1500);
+  const finish = (success, reason) => {
+    if (settled) return;
+    settled = true;
+    if (guard) clearTimeout(guard);
+    phase(success ? 'print_callback_success' : 'print_callback_failure', reason ? { reason: String(reason) } : {});
+    mainWindow?.webContents.send('print:status', {
+      type: 'label', success, reason: reason || null, printer: settings.labelPrinter,
+      labelId: input.labelId, order: input.order, tracking: input.tracking,
+      timestamp: Date.now(), phases,
+    });
+    if (!success && mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error', title: 'Label Did Not Print',
+        message: `The shipping label could not be printed to "${settings.labelPrinter}".`,
+        detail: String(reason || 'Unknown error')
+          + '\n\nCheck that the printer is online and selected in Print Settings, then try again.',
+        buttons: ['OK'],
+      }).catch(() => {});
+    }
+    destroy();
+  };
+  const fallback = (reason) => {
+    if (settled) return;
+    settled = true;
+    if (guard) clearTimeout(guard);
+    phase('native_fallback', { reason: String(reason) });
+    try { win?.destroy(); } catch (_) {}
+    win = null;
+    restoreMainFocus();
+    // Existing handler re-reads settings and owns its own status, dialog, timeout and cleanup.
+    handleLabelPrint(input.fallbackUrl);
+  };
+
+  phase('ipc_received', {
+    renderer_to_main_ms: input.rendererSentAt ? Math.max(0, Date.now() - input.rendererSentAt) : null,
+  });
+  guard = setTimeout(() => {
+    if (printInvoked) finish(false, 'Timed out waiting for the printer callback');
+    else fallback('Timed out preparing the local PNG label');
+  }, 30000);
+
+  try {
+    phase('png_fetch_start', { host: new URL(input.pngUrl).hostname });
+    const response = await fetch(input.pngUrl, { signal: AbortSignal.timeout(15000), redirect: 'follow' });
+    const finalUrl = new URL(response.url);
+    if (finalUrl.protocol !== 'https:' || finalUrl.hostname !== 'api.shipengine.com') {
+      throw new Error('ShipEngine label download redirected to a disallowed host');
+    }
+    if (!response.ok) throw new Error(`ShipEngine PNG download returned HTTP ${response.status}`);
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > 10 * 1024 * 1024) throw new Error('ShipEngine PNG exceeds the 10 MB limit');
+    const pngBytes = Buffer.from(await response.arrayBuffer());
+    if (pngBytes.length > 10 * 1024 * 1024) throw new Error('ShipEngine PNG exceeds the 10 MB limit');
+    const html = buildLabelHtml(pngBytes); // also validates the PNG signature
+    phase('png_fetch_complete', { bytes: pngBytes.length, http_status: response.status });
+
+    win = new BrowserWindow({
+      show: false, backgroundColor: '#ffffff',
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    });
+    win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+      if (isMainFrame && !printInvoked) fallback(`Local label page failed to load: ${desc} (${code})`);
+    });
+    win.webContents.once('did-finish-load', async () => {
+      if (settled) return;
+      try {
+        const imageReady = await win.webContents.executeJavaScript(
+          'new Promise(function(resolve){var i=document.images[0];if(i&&i.complete)return resolve(i.naturalWidth>0);'
+          + 'if(!i)return resolve(false);i.onload=function(){resolve(i.naturalWidth>0)};i.onerror=function(){resolve(false)};'
+          + 'setTimeout(function(){resolve(false)},5000);})'
+        );
+        if (!imageReady) return fallback('Local label page did not render a valid image');
+        phase('local_page_ready');
+        const opts = {
+          silent: true, deviceName: settings.labelPrinter, copies: settings.labelCopies || 1,
+          pageSize: { width: settings.labelPaperWidth, height: settings.labelPaperHeight },
+          margins: { marginType: 'none' }, landscape: false,
+        };
+        printInvoked = true;
+        phase('print_invoked', { printer: settings.labelPrinter });
+        win.webContents.print(opts, (success, reason) => finish(success, success ? null : reason));
+      } catch (err) {
+        if (printInvoked) finish(false, err);
+        else fallback(err);
+      }
+    });
+    phase('local_page_load_start');
+    await win.loadURL('data:text/html;base64,' + Buffer.from(html, 'utf8').toString('base64'));
+  } catch (err) {
+    if (printInvoked) finish(false, err);
+    else fallback(err);
+  }
+}
+
 // ─── Save packing slips / pick list to a PDF (manual override) ───────────────
 
 // WHAT: renders the slip page to a Letter PDF in a HIDDEN authenticated window, writes
@@ -1182,6 +1329,24 @@ ipcMain.on('print:label-url', (event, payload) => {
     return;
   }
   handleLabelPrint(url);
+});
+
+// DEPENDS: preload.js exposes this exact channel as printLabelPng(), and assets/ui.html sends
+// the label-print.js payload contract. Validation happens before any network or printer action.
+ipcMain.on('print:label-png', (_event, payload) => {
+  const settings = store.get('printSettings');
+  if (!settings.autoPrintLabels) {
+    console.log('[fww-print] auto-print labels disabled, skipping native PNG print');
+    return;
+  }
+  if (!settings.labelPrinter) {
+    mainWindow?.webContents.send('print:status', {
+      type: 'label', success: false, reason: 'No label printer configured', timestamp: Date.now(),
+    });
+    openPrintManager();
+    return;
+  }
+  printLabelPngLocally(payload, settings);
 });
 
 // Open print manager window
