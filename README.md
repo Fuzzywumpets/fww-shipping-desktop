@@ -299,6 +299,13 @@ permissions, so it can never touch a GitHub Release:
   `store`), validates it with the Windows SDK's `makeappx unpack`, runs the Windows App
   Certification Kit if present, and uploads the package as a **CI artifact only**.
 
+> **`workflow_dispatch` is not selectable until this file reaches `main`.** GitHub only offers
+> a workflow for manual dispatch once it exists on the repository's *default* branch, even when
+> you ask it to run against a feature branch. Until `msix.yml` is merged, the Windows MSIX job
+> can only be exercised by running the commands locally on a Windows machine
+> (`npm ci && npm run msix:tools && npm run dist:msix`). The PR-triggered `checks` job is
+> unaffected and runs normally.
+
 `.github/workflows/build.yml` — the `v*`-tag NSIS release — is unchanged.
 
 ### Rollback / removal
