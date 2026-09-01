@@ -1,3 +1,22 @@
 node_modules/
 dist/
 *.log
+
+# ─── MSIX / Microsoft Store build ────────────────────────────────────────────
+# Pinned Windows-only winapp CLI toolchain (installed by `npm run msix:tools`;
+# build/msix/package.json + package-lock.json ARE committed, the install is not).
+build/msix/node_modules/
+
+# Development signing material. These are throwaway self-signed certificates for
+# local sideload testing ONLY — never a Store or Authenticode credential — but a
+# private key has no business in git regardless.
+*.pfx
+*.cer
+*.pvk
+
+# Generated packages. The MSIX artifacts land in dist/ (already ignored above);
+# these patterns catch a stray package built anywhere else in the tree.
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle

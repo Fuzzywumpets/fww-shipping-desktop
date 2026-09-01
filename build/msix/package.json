@@ -1,0 +1,9 @@
+{
+  "name": "fww-shipping-msix-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Windows-only toolchain for the FWW Shipping MSIX build. Kept OUT of the root package.json on purpose: @microsoft/winappcli declares os=win32, so listing it as a root devDependency makes `npm ci` fail with EBADPLATFORM on Linux and macOS — including the Linux runners that build nothing but still install the repo. Installed separately with `npm run msix:tools` (npm ci --prefix build/msix), which pins the exact version via the lockfile beside this file. Never invoke winapp through a bare, unpinned npx.",
+  "devDependencies": {
+    "@microsoft/winappcli": "0.6.2"
+  }
+}

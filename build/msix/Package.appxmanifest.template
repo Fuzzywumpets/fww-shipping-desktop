@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FWW Shipping — MSIX package manifest TEMPLATE.
+
+  Do not hand-edit the generated dist/msix/layout/Package.appxmanifest; edit this template
+  and re-run `npm run msix:manifest`. Every double-brace placeholder below is filled in by
+  tools/msix/generate-manifest.js from package.json + build/msix/identity.json + MSIX_*
+  environment variables. Generation fails loudly on any placeholder it cannot resolve, so a
+  missing Partner Center value can never silently ship as an empty string. (That check scans
+  this whole file, comments included — so do not write an example placeholder in prose here.)
+
+  LOAD-BEARING CHOICES — read before changing anything here:
+
+  * EntryPoint="Windows.FullTrustApplication" + <rescap:Capability Name="runFullTrust" />
+    make this a packaged CLASSIC desktop app (Desktop Bridge / "packagedClassicApp"), running
+    at medium integrity OUTSIDE an app container. That is not a style preference. In an app
+    container (uap10:TrustLevel="appContainer") this app breaks in ways that are invisible
+    until a shipping operator hits them:
+      - webContents.getPrintersAsync() cannot enumerate named printers, so the Rollo and the
+        Canon disappear from Print Settings;
+      - silent webContents.print() to a named printer fails;
+      - the temp-PDF writes that label printing depends on are redirected/denied;
+      - tray icon, hidden print BrowserWindows and browser popups (the Cloudflare Access
+        login flow) stop behaving like a normal Win32 app.
+    NEVER add uap10:TrustLevel="appContainer" to this manifest.
+
+  * There is deliberately NO <uap10:RuntimeBehavior> / <uap10:TrustLevel> attribute pair,
+    even though they are the modern way to spell the same thing. Those attributes require
+    Windows 10 2004 (build 19041); the EntryPoint + runFullTrust form works from Windows 10
+    1607 onward and is what the Store has accepted for packaged Win32 apps for years. Adding
+    them would force MinVersion up to 10.0.19041.0 for no behavioural gain.
+
+  * MinVersion 10.0.17763.0 is Windows 10 1809 / LTSC 2019 — comfortably inside Electron 36's
+    "Windows 10 or later" support statement, and old enough not to strand a shipping PC.
+
+  * Capabilities lists ONLY runFullTrust. A full-trust packaged desktop app is not network
+    restricted, so internetClient is unnecessary; every extra capability is another question
+    to answer during Store certification.
+
+  * No <uap:SplashScreen>: that element is for UWP apps, not FullTrustApplication entry points.
+
+  SYNC: the Assets\* paths below must match the files tools/msix/generate-assets.js writes
+  into build/msix/assets/ and tools/msix/stage-layout.js copies into the package layout.
+  stage-layout.js re-reads this manifest and fails if a referenced asset is missing.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <!--
+    Identity is pure deployment input. In development these are the placeholders from
+    build/msix/identity.json and the package is signed with a throwaway local certificate
+    whose subject must equal Publisher exactly. For a Store build, Name and Publisher must be
+    copied VERBATIM from Partner Center > Product identity; Microsoft signs the package, so we
+    never sign a Store artifact ourselves.
+  -->
+  <Identity
+    Name="{{IDENTITY_NAME}}"
+    Publisher="{{PUBLISHER}}"
+    Version="{{PACKAGE_VERSION}}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>{{DISPLAY_NAME}}</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>{{DESCRIPTION}}</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      Executable is generated from package.json build.productName, i.e. exactly the .exe that
+      the `npm run dist:dir` electron-builder invocation writes to the root of
+      dist/win-unpacked. It contains a space ("FWW Shipping.exe"); that is legal in an MSIX
+      manifest and must stay quoted here.
+    -->
+    <Application
+      Id="FWWShipping"
+      Executable="{{EXECUTABLE}}"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="{{DISPLAY_NAME}}"
+        Description="{{DESCRIPTION}}"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

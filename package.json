@@ -8,6 +8,14 @@
     "start": "electron .",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win --dir",
+    "test": "node --test \"test/**/*.test.js\"",
+    "msix:tools": "npm ci --prefix build/msix",
+    "msix:assets": "electron tools/msix/generate-assets.js",
+    "msix:manifest": "node tools/msix/generate-manifest.js",
+    "msix:manifest:store": "node tools/msix/generate-manifest.js --store",
+    "msix:stage": "node tools/msix/stage-layout.js",
+    "dist:msix": "npm run dist:dir && npm run msix:manifest && npm run msix:stage && node tools/msix/pack.js --dev",
+    "dist:msix:store": "npm run dist:dir && npm run msix:manifest:store && npm run msix:stage && node tools/msix/pack.js --store",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
@@ -56,6 +64,7 @@
     },
     "files": [
       "main.js",
+      "update-channel.js",
       "fww-logsink.cjs",
       "preload.js",
       "print-manager.html",

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "DEVELOPMENT DEFAULTS ONLY. These produce a locally installable, locally signed MSIX so",
+    "the Store packaging path can be built and tested before Partner Center verification",
+    "completes and before the app name is reserved.",
+    "",
+    "Nothing here is a real Store value. For a Store build, supply the real values as",
+    "environment variables and run `npm run dist:msix:store` -- it refuses to build if these",
+    "placeholders are still in play:",
+    "",
+    "  MSIX_IDENTITY_NAME          Partner Center > Product identity > Package/Identity/Name",
+    "  MSIX_PUBLISHER              Partner Center > Product identity > Package/Identity/Publisher",
+    "                              (the CN=<GUID> string, copied verbatim)",
+    "  MSIX_PUBLISHER_DISPLAY_NAME Partner Center > Product identity > Package/Properties/PublisherDisplayName",
+    "  MSIX_DISPLAY_NAME           the reserved app name",
+    "  MSIX_PACKAGE_VERSION        optional; defaults to package.json version + '.0'",
+    "",
+    "Environment variables win over this file, so CI can inject them as secrets without a",
+    "checked-in copy of the Store identity."
+  ],
+  "identityName": "FuzzywumpetsDev.FWWShipping",
+  "publisher": "CN=Fuzzywumpets Development, O=Fuzzywumpets, C=US",
+  "publisherDisplayName": "Fuzzywumpets (development)",
+  "displayName": "FWW Shipping (Dev)",
+  "description": "Fuzzywumpets Shipping — desktop app with background label and packing-slip printing."
+}

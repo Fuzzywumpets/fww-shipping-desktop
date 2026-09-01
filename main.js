@@ -6,6 +6,10 @@ const {
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const Store = require('electron-store').default || require('electron-store');
+// DEPENDS: package.json build.files must list 'update-channel.js' or this require() throws in
+// the packaged app. See the comment block in update-channel.js for why the channel decision
+// lives in its own module rather than inline here.
+const { UPDATE_CHANNELS, resolveUpdateChannel } = require('./update-channel');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -81,6 +85,14 @@ let printManagerWindow = null;
 let tray              = null;
 let quitting          = false;   // true when user explicitly quits
 
+// DISTRIBUTION CHANNEL — 'github' (NSIS installer) | 'store' (Microsoft Store MSIX) | 'dev'.
+// Resolved ONCE in app.whenReady() (process.windowsStore is only meaningful after Electron has
+// initialised) and read by both setupAutoUpdater() and checkForUpdatesInteractive().
+// INVARIANT: nothing else in this file may sniff process.windowsStore or app.isPackaged to
+// decide update behaviour — go through this variable, or the menu, the tray and startup will
+// eventually disagree about which channel they are in.
+let updateChannel     = UPDATE_CHANNELS.DEV;
+
 // After any hidden print window / viewer / print-manager window is torn down,
 // Windows can leave the main window without OS keyboard focus — so the next
 // barcode scan's keystrokes never reach the page. Restore focus defensively.
@@ -113,6 +125,16 @@ function restoreMainFocus() {
 // and Help > Check for Updates works.
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark';
+  // MUST be first: buildAppMenu() and createTray() both wire up a "Check for Updates" item
+  // whose behaviour depends on the channel, and setupAutoUpdater() below refuses to arm
+  // outside the GitHub channel. Resolving after whenReady is deliberate — process.windowsStore
+  // is only populated once Electron has initialised.
+  updateChannel = resolveUpdateChannel({
+    isPackaged:   app.isPackaged,
+    windowsStore: process.windowsStore === true,
+    override:     process.env.FWW_UPDATE_CHANNEL,
+  });
+  console.log(`[updater] distribution channel: ${updateChannel}`);
   buildAppMenu();
   createMainWindow();
   createTray();
@@ -1382,14 +1404,22 @@ function updateTrayMenu() {
 // CHANGE-GUARD: Help > Check for Updates on the LATEST version must show a 'you're on the
 // latest' dialog; automatic startup/4h checks must stay silent (no nag dialogs).
 let _updateCheckInteractive = false;
-// WHAT: user-triggered update check (menu + tray). In a dev/unpackaged build it just
-// explains auto-update only runs in the installed app and returns. In the packaged app it
-// sets _updateCheckInteractive and kicks autoUpdater.checkForUpdates(); errors surface via
-// the 'error' handler (hence the empty .catch).
-// CHANGE-GUARD: run from source -> 'dev build' dialog; run installed -> a real check with a
-// visible outcome dialog.
+// WHAT: user-triggered update check (menu + tray). Branches on the distribution channel:
+//   'dev'    -> explains auto-update only runs in the installed app and returns.
+//   'store'  -> explains Windows/the Microsoft Store owns updates, and offers to open the
+//               Store's downloads-and-updates page. NEVER touches autoUpdater, so no GitHub
+//               request is made from a Store build even when the user asks for a check.
+//   'github' -> the original behaviour: set _updateCheckInteractive and kick
+//               autoUpdater.checkForUpdates(); errors surface via the 'error' handler (hence
+//               the empty .catch).
+// DEPENDS: this is the ONLY entry point behind both the Help menu item and the tray item, so
+// both channels stay consistent by construction. If a third "check for updates" affordance is
+// ever added, route it here too.
+// CHANGE-GUARD: run from source -> 'dev build' dialog; run the NSIS install -> a real check
+// with a visible outcome dialog; run the MSIX (or FWW_UPDATE_CHANNEL=store) -> the
+// Store-managed dialog and ZERO network traffic to github.com.
 function checkForUpdatesInteractive() {
-  if (!app.isPackaged) {
+  if (updateChannel === UPDATE_CHANNELS.DEV) {
     dialog.showMessageBox(mainWindow, {
       type: 'info', title: 'Check for Updates',
       message: 'Auto-update only runs in the installed app.',
@@ -1398,24 +1428,62 @@ function checkForUpdatesInteractive() {
     });
     return;
   }
+
+  if (updateChannel === UPDATE_CHANNELS.STORE) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Check for Updates',
+      message: 'Updates are managed by the Microsoft Store.',
+      detail: `You're running FWW Shipping ${app.getVersion()} from the Microsoft Store, so Windows ` +
+              'installs updates automatically in the background — there is nothing to check here.\n\n' +
+              'To force a check now, open the Store and choose "Get updates".',
+      buttons: ['Open Microsoft Store', 'OK'],
+      defaultId: 1,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response !== 0) return;
+      // 'ms-windows-store:' is a non-web scheme, which this app otherwise refuses to hand to
+      // Windows (see the setWindowOpenHandler branch: an unrecognised scheme pops the "no app
+      // for this link. Open app store?" dialog). It is safe HERE and only here: this branch is
+      // reachable only in a build that was installed FROM the Store, so the Store app is
+      // present by definition and owns the scheme. Still wrapped, because a failure to open a
+      // convenience link must never break the app.
+      try {
+        shell.openExternal('ms-windows-store://downloadsandupdates');
+      } catch (e) {
+        console.warn('[updater] could not open the Store updates page:', e?.message || e);
+      }
+    }).catch(() => {}); // a dismissed/failed dialog must never surface as an unhandled rejection
+    return;
+  }
+
   _updateCheckInteractive = true;
   autoUpdater.checkForUpdates().catch(() => {}); // failures surface via the 'error' handler
 }
 
-// WHAT: electron-updater wiring for the per-user installed app (public GitHub releases).
+// WHAT: electron-updater wiring for the NSIS-installed app (public GitHub releases).
 // autoDownload + autoInstallOnAppQuit are ON. Handlers: update-available (download starts),
 // update-not-available, update-downloaded (prompt Restart Now / Later), error.
-// INVARIANT: only ever runs in the packaged app (early return when !app.isPackaged) — dev
-// builds never self-update. 'update-downloaded' sets quitting=true before quitAndInstall so
-// the close/quit guards don't fight the relaunch.
+// INVARIANT: only ever runs in the GitHub channel — see the hard gate below. 'update-downloaded'
+// sets quitting=true before quitAndInstall so the close/quit guards don't fight the relaunch.
 // CHANGE-GUARD: publish a bump and confirm: silent auto-download, the Restart prompt, and a
-// successful relaunch into the new version. Verify dev builds still skip all of this.
+// successful relaunch into the new version. Verify dev AND Store builds still skip all of this.
 function setupAutoUpdater() {
-// HARD GATE: never arm the updater in a dev/source run — electron-updater has no valid
-// install metadata there and would error on every check. Do not remove this guard.
-// CHANGE-GUARD: launch from source and confirm NO update errors are logged and no 4h
+// HARD GATE: arm the updater ONLY in the GitHub channel. This replaces the old
+// `if (!app.isPackaged) return` and widens it, because there are now two non-GitHub channels:
+//   • 'dev'   — electron-updater has no valid install metadata in a source run and would error
+//               on every check (the original reason for this guard).
+//   • 'store' — the MSIX package lives under C:\Program Files\WindowsApps, which is read-only
+//               and signature-enforced. Windows owns updates there, so arming this would mean
+//               pointless GitHub requests, a download that cannot be applied, and a
+//               quitAndInstall() that can only fail. No timers, no checks, no prompts.
+// Do not weaken this to an isPackaged check again — a Store build IS packaged.
+// CHANGE-GUARD: launch from source, and launch the MSIX (or set FWW_UPDATE_CHANNEL=store);
+// in BOTH cases confirm NO update errors are logged, no GitHub request is made, and no 4h
 // interval is created.
-  if (!app.isPackaged) return;  // skip in dev mode
+  if (updateChannel !== UPDATE_CHANNELS.GITHUB) {
+    console.log(`[updater] not arming electron-updater (channel: ${updateChannel})`);
+    return;
+  }
 
   autoUpdater.autoDownload        = true;
   autoUpdater.autoInstallOnAppQuit = true;
