@@ -54,7 +54,7 @@ forwards it to the main process, which writes a temp PDF and prints it silently
 to the label printer. Packing slips open a `/slip-render` page whose
 `window.print()` is intercepted and routed to the slip printer instead.
 
-Settings are stored **per machine** via `electron-store` at
+Settings are stored **per Windows account** via `electron-store` at
 `%APPDATA%/fww-shipping-desktop/config.json`.
 
 ---
@@ -101,7 +101,9 @@ auto-updater consumes.
 
 ## Install (operator machine)
 
-1. Run `FWW Shipping Setup <version>.exe`.
+1. New PC: run `tools/provision-all-users.ps1` once, elevated (see *Install for every Windows user*
+   below); every account then gets the app at its next sign-in. Single account only: just run
+   `FWW-Shipping-Setup-<version>.exe` (no admin needed).
 2. First launch opens the Google login (Cloudflare Access) — sign in with a
    `@fuzzywumpets.com` account or `erin.m.karson@gmail.com`.
 3. Click the 🖨 button (bottom-right) or the tray icon → **Print Settings**.
@@ -111,25 +113,32 @@ auto-updater consumes.
 That's it — labels auto-print to the Rollo on purchase, slips print to the Canon
 when triggered, all in the background.
 
-### Machine-wide install — do not revert to per-user
+### Install for every Windows user (per-user app, admin-free updates)
 
-The installer is built **per-machine** (`nsis.perMachine: true`): it installs to
-`C:\Program Files\FWW Shipping` and creates **all-users** Start-menu and Public
-Desktop shortcuts, so every Windows account on the PC gets the app from a single
-elevated install. This matters on shared shipping machines where operators log
-in under their own accounts.
+The installer is **per-user** (`nsis.perMachine: false`): each Windows account gets its own copy in
+`%LOCALAPPDATA%\Programs\fww-shipping-desktop`, and `electron-updater` updates it silently with **no admin
+prompt**. (1.0.20–1.0.22 were per-machine in `C:\Program Files\FWW Shipping`; updating that copy needs
+administrator rights, so non-admin accounts such as the shipping staff got a UAC prompt they could not
+approve and never updated.)
 
-**Every future build must keep `nsis.perMachine: true`.** Flipping it back to
-`false` produces a `oneClick` per-user installer, which:
+A per-user installer only installs for whoever runs it, so each shipping PC needs a **one-time admin setup**
+that makes Windows install the app for every account automatically:
 
-- silently installs into only the invoking user's `%LOCALAPPDATA%\Programs`,
-- offers **no** "install for all users" prompt at all (a `oneClick` installer
-  has no UI to click), and
-- leaves every other account on the machine without the app.
+```powershell
+# Elevated PowerShell, once per PC (after a >= 1.0.23 release is published):
+powershell -ExecutionPolicy Bypass -File .\tools\provision-all-users.ps1     # add -WhatIf to preview
+```
 
-That is the exact failure this setting fixes — it is load-bearing, not cosmetic.
-Because `package.json` is JSON and cannot carry a `DEPENDS:` comment, this note
-is the dependency marker.
+It downloads the latest release installer (SHA-512-verified against `latest.yml`; refuses anything older
+than the first per-user build), stages it read-only in `%ProgramData%\FWW Shipping`, removes the old
+machine-wide install, and registers **Windows Active Setup** so every account — existing and future — gets
+the app silently at its next sign-in (accounts that already have it are skipped). Printer settings and logins
+live in each account's `%APPDATA%\fww-shipping-desktop` and are not touched.
+
+**Do not flip `nsis.perMachine` back to `true`**: that reintroduces admin-only updates for every non-admin
+account. Because `package.json` cannot carry a `DEPENDS:` comment, this section plus
+`test/install-model.test.js` are the dependency marker (SYNC: install-model, with
+`tools/provision-all-users.ps1`).
 
 ---
 
