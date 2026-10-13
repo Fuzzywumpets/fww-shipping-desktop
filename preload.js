@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('__fwwDesktop', {
   // Is this the desktop app?
   isDesktop: true,
 
+  // Re-assert OS focus after a native alert()/confirm() (see main.js injectDialogFocusFix).
+  // DEPENDS: main.js ipcMain.on('app:refocus') + the injected alert wrapper that calls this.
+  refocus: () => ipcRenderer.send('app:refocus'),
+
   // Open the print manager
   openPrintManager: () => ipcRenderer.send('print:open-manager'),
 

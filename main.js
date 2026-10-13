@@ -372,6 +372,7 @@ function createMainWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     injectPrintInterceptor(mainWindow.webContents);
     injectPrintButton(mainWindow.webContents);
+    injectDialogFocusFix(mainWindow.webContents);
   });
 
   // Show window once page is ready (avoids white flash)
@@ -468,6 +469,34 @@ function injectPrintInterceptor(wc) {
 // -> openPrintManager(). Guarded by window.__fwwPrintBtnInjected (idempotent re-inject).
 // CHANGE-GUARD: the 🖨 button must appear after every load AND clicking it must open the
 // Print Settings window (it's one of three entry points: button, menu, tray).
+// WHAT: after a native alert()/confirm()/prompt() closes, force the window to re-take OS focus.
+// WHY: on Windows Electron, dismissing a native JS dialog leaves the page's inputs un-editable
+// (can't click/type in any field) until the window is blurred and refocused. The shipping UI's
+// alert("A return label needs the customer's phone number…") hit this: after OK, no field accepted input.
+// DEPENDS: preload.js __fwwDesktop.refocus -> ipcMain.on('app:refocus') below.
+// CHANGE-GUARD: trigger an alert in the UI, press OK, then click into a text field and type.
+function injectDialogFocusFix(wc) {
+  wc.executeJavaScript(`(function(){
+    if (window.__fwwDialogFix) return; window.__fwwDialogFix = true;
+    ['alert','confirm','prompt'].forEach(function(n){
+      var orig = window[n];
+      window[n] = function(){
+        try { return orig.apply(window, arguments); }
+        finally { setTimeout(function(){ try { window.__fwwDesktop && window.__fwwDesktop.refocus(); } catch(e){} }, 0); }
+      };
+    });
+  })();`).catch(() => {});
+}
+ipcMain.on('app:refocus', () => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.blur();
+      mainWindow.focus();
+      mainWindow.webContents.focus();
+    }
+  } catch (_) {}
+});
+
 function injectPrintButton(wc) {
   const code = `
 (function() {
