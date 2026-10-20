@@ -16,7 +16,7 @@ repo; this app just loads it). No bundled app logic to keep in sync.
 | Feature | How |
 |---|---|
 | **Installed Windows app** | NSIS `.exe` installer → Start-menu + desktop shortcuts, custom icon, uninstaller. |
-| **OAuth + whitelist** | Delegated to **Cloudflare Access** on `shipping.fuzzyreporting.com` (Google IdP). Policy *"Fuzzywumpets staff + Erin"* allows `@fuzzywumpets.com` **and** `erin.m.karson@gmail.com`. Login cookies persist across restarts (`persist:shipping` session partition). |
+| **OAuth + whitelist** | Delegated to **Cloudflare Access** on `shipping.fuzzyreporting.com` (Google IdP). Policy *"Fuzzywumpets staff + Erin"* allows `@fuzzywumpets.com` **and** `<staff Gmail (see Doppler B2B_ADMIN_ALLOWED_EMAILS)>`. Login cookies persist across restarts (`persist:shipping` session partition). |
 | **Always-latest code** | Loads the live deployed Worker URL on launch. |
 | **Silent label printing** | Intercepts the `/label` PDF response, prints it to the configured label printer (e.g. Rollo 4×6) with **no dialog** the moment a label is purchased. |
 | **Silent slip printing** | Intercepts the packing-slip render page and prints to the configured slip printer (e.g. Canon, Letter). |
@@ -103,7 +103,7 @@ auto-updater consumes.
 
 1. Run `FWW Shipping Setup <version>.exe`.
 2. First launch opens the Google login (Cloudflare Access) — sign in with a
-   `@fuzzywumpets.com` account or `erin.m.karson@gmail.com`.
+   `@fuzzywumpets.com` account or `<staff Gmail (see Doppler B2B_ADMIN_ALLOWED_EMAILS)>`.
 3. Click the 🖨 button (bottom-right) or the tray icon → **Print Settings**.
 4. Pick the **label printer** (Rollo 4×6) and **slip printer** (Canon, Letter),
    run the **Test Print** for each, toggle auto-print on, **Save**.
