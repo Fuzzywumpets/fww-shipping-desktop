@@ -12,6 +12,14 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { buildLabelHtml, validateLabelPngPayload } = require('./label-print');
 
+// Unpackaged (`npm start`) runs get their own userData folder. The single-instance lock and the
+// electron-store config both key off userData, so without this a dev run loses the lock to an
+// installed FWW Shipping and exits 0, or edits that install's printer settings.
+// DEPENDS: must run before `new Store()` and app.requestSingleInstanceLock() below.
+if (!app.isPackaged) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'FWW Shipping (dev)'));
+}
+
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
 // Best-effort; no-ops unless ERROR_SINK_BEARER is provided in the environment.
