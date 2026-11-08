@@ -118,7 +118,7 @@ function Get-Sha512Base64([string]$file) {
 function Get-InstalledVersion([string]$exe) {
   if ($InstalledVersion) { return [version]$InstalledVersion }
   # A half-finished install (e.g. interrupted while files were replaced) must heal on the next run.
-  if (-not (Test-Path $exe)) { Write-Log "no $exe: treating the installed version as 0.0.0"; return [version]'0.0.0' }
+  if (-not (Test-Path $exe)) { Write-Log "no ${exe}: treating the installed version as 0.0.0"; return [version]'0.0.0' }
   $v = (Get-Item $exe).VersionInfo.FileVersion
   if ($v -notmatch '^(\d+)\.(\d+)\.(\d+)') { throw "cannot read the version of $exe" }
   return [version]('{0}.{1}.{2}' -f $Matches[1], $Matches[2], $Matches[3])

@@ -124,3 +124,15 @@ test('main.js: machine-managed mode returns before the legacy dialogs and never 
   assert.doesNotMatch(sysBranch, /quitAndInstall/);
   assert.match(fn, /app\.on\('will-quit'[\s\S]*runTaskCommand\(systemUpdater\.taskName\)/);
 });
+
+test('PowerShell scripts: no "$name:" inside strings (PS 5.1 parses it as a drive/scope and the script fails to load)', () => {
+  const scopes = new Set(['env', 'script', 'global', 'local', 'private', 'using', 'function', 'variable']);
+  for (const f of ['updater/fww-update.ps1', 'updater/register-task.ps1', 'test/fww-update.tests.ps1']) {
+    const bad = [...read(f).matchAll(/\$([A-Za-z_][A-Za-z0-9_]*):(?!:)/g)].filter((m) => !scopes.has(m[1].toLowerCase()));
+    assert.deepEqual(bad.map((m) => m[0]), [], `${f}: use \${name}: instead`);
+  }
+});
+
+test('installer.nsh provides what the default app-running check needs once customCheckAppRunning exists', () => {
+  assert.match(nsh, /!include "getProcessInfo\.nsh"\s+Var pid\s+!macro customCheckAppRunning/);
+});

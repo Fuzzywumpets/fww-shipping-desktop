@@ -29,6 +29,11 @@
 ; exit code 75 (nothing touched) so the updater defers instead of closing a packer's app mid-label.
 ; Every other run (manual install, the old uninstaller during an update) keeps the default.
 ; SYNC: system-update-defer - fww-update.ps1 passes --fww-system-update and treats exit 75 as "deferred".
+; DEPENDS: app-builder-lib include/allowOnlyOneInstallerInstance.nsh only includes getProcessInfo.nsh
+; and declares `Var pid` when NO customCheckAppRunning exists; the default branch below
+; (_CHECK_APP_RUNNING) needs both, so they are provided here.
+!include "getProcessInfo.nsh"
+Var pid
 !macro customCheckAppRunning
   ClearErrors
   ${GetParameters} $R0
