@@ -11,6 +11,7 @@ const os = require('os');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { buildLabelHtml, validateLabelPngPayload } = require('./label-print');
+const { readSystemUpdater, updaterSettings, runTaskCommand } = require('./updater-mode');
 
 // ─── Error logging (fww-error-sink) ──────────────────────────────────────────
 // Reports main-process crashes + render-process-gone to the estate error sink.
@@ -1596,9 +1597,15 @@ function checkForUpdatesInteractive() {
   autoUpdater.checkForUpdates().catch(() => {}); // failures surface via the 'error' handler
 }
 
-// WHAT: electron-updater wiring for the per-user installed app (public GitHub releases).
-// autoDownload + autoInstallOnAppQuit are ON. Handlers: update-available (download starts),
-// update-not-available, update-downloaded (prompt Restart Now / Later), error.
+// WHAT: electron-updater wiring for the installed app (public GitHub releases). Two modes
+// (updater-mode.js):
+//  - machine-managed (resources/updater/system-updates.json exists): the SYSTEM "<productName>
+//    Updater" task installs updates silently once the app is closed in every account. Here
+//    electron-updater only CHECKS (autoDownload/autoInstallOnAppQuit OFF, never quitAndInstall,
+//    which on this per-machine install would raise UAC and ask staff for an admin password).
+//    update-available offers "Quit and Update"; quitting fires the task (will-quit below).
+//  - legacy (no marker): autoDownload + autoInstallOnAppQuit ON. Handlers: update-available
+//    (download starts), update-not-available, update-downloaded (Restart Now / Later), error.
 // INVARIANT: only ever runs in the packaged app (early return when !app.isPackaged) — dev
 // builds never self-update. 'update-downloaded' sets quitting=true before quitAndInstall so
 // the close/quit guards don't fight the relaunch.
@@ -1611,14 +1618,54 @@ function setupAutoUpdater() {
 // interval is created.
   if (!app.isPackaged) return;  // skip in dev mode
 
-  autoUpdater.autoDownload        = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  const systemUpdater = readSystemUpdater(process.resourcesPath);
+  const settings = updaterSettings(systemUpdater);
+  autoUpdater.autoDownload        = settings.autoDownload;
+  autoUpdater.autoInstallOnAppQuit = settings.autoInstallOnAppQuit;
+  console.log(`[updater] mode: ${systemUpdater ? `machine-managed (task "${systemUpdater.taskName}")` : 'legacy electron-updater'}`);
+
+  // Machine-managed only: the version the task will install, and the last version we asked about
+  // (the 4h checks re-fire update-available; ask once per version per run).
+  let pendingSystemUpdate = null;
+  let askedSystemUpdate = null;
+  if (systemUpdater) {
+    // CHANGE-GUARD: with an update pending, closing the window / tray Quit must start the task
+    // (updater.log in C:\ProgramData\FWW Shipping shows the run); with none pending, nothing runs.
+    app.on('will-quit', () => {
+      if (!pendingSystemUpdate) return;
+      const { file, args } = runTaskCommand(systemUpdater.taskName);
+      try {
+        require('child_process').spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+        console.log(`[updater] started task "${systemUpdater.taskName}" for ${pendingSystemUpdate}`);
+      } catch (e) {
+        console.error('[updater] could not start the update task:', e?.message || e);
+      }
+    });
+  }
 
   autoUpdater.on('update-available', (info) => {
     console.log(`[updater] update available: ${info.version}`);
     mainWindow?.webContents.send('updater:status', {
       type: 'available', version: info.version,
     });
+    if (systemUpdater) {
+      pendingSystemUpdate = info.version;
+      const interactive = _updateCheckInteractive;
+      _updateCheckInteractive = false;
+      if (!interactive && askedSystemUpdate === info.version) return;
+      askedSystemUpdate = info.version;
+      // Default is Later: an automatic check must never close the app mid-label on a stray Enter.
+      dialog.showMessageBox(mainWindow, {
+        type: 'info', title: 'Update Available',
+        message: `FWW Shipping ${info.version} is available.`,
+        detail: 'It installs automatically, with no password, once FWW Shipping is closed on this PC '
+          + '(in every Windows account that has it open), or at the next restart. Quit now to install it?',
+        buttons: ['Quit and Update', 'Later'], defaultId: 1, cancelId: 1,
+      }).then(({ response }) => {
+        if (response === 0) { quitting = true; app.quit(); }
+      }).catch(() => {});
+      return;
+    }
     if (_updateCheckInteractive) {
       _updateCheckInteractive = false;
       dialog.showMessageBox(mainWindow, {
