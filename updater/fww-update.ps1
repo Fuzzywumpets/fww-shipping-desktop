@@ -117,6 +117,8 @@ function Get-Sha512Base64([string]$file) {
 
 function Get-InstalledVersion([string]$exe) {
   if ($InstalledVersion) { return [version]$InstalledVersion }
+  # A half-finished install (e.g. interrupted while files were replaced) must heal on the next run.
+  if (-not (Test-Path $exe)) { Write-Log "no $exe: treating the installed version as 0.0.0"; return [version]'0.0.0' }
   $v = (Get-Item $exe).VersionInfo.FileVersion
   if ($v -notmatch '^(\d+)\.(\d+)\.(\d+)') { throw "cannot read the version of $exe" }
   return [version]('{0}.{1}.{2}' -f $Matches[1], $Matches[2], $Matches[3])
@@ -151,7 +153,7 @@ function Invoke-Update {
   Write-Log "update $installed -> ${available}: downloading $installerUrl"
   $wc.DownloadFile($installerUrl, $installer)
   $actual = Get-Sha512Base64 $installer
-  if ($actual -ne $feed.sha512) {
+  if ($actual -cne $feed.sha512) {   # -cne: Base64 is case-sensitive
     Remove-Item -Force $installer
     Write-Log "ABORT: sha512 mismatch for $($feed.path) (feed $($feed.sha512), file $actual)"
     return 3
@@ -170,9 +172,15 @@ function Invoke-Update {
   if ($DryRun) { Write-Log "dry run: would run $installer /S --updated"; return 0 }
 
   # Re-check the hash right before running (the folder is admin-only; this is belt and braces).
-  if ((Get-Sha512Base64 $installer) -ne $feed.sha512) { Write-Log 'ABORT: installer changed after verification'; return 3 }
+  if ((Get-Sha512Base64 $installer) -cne $feed.sha512) { Write-Log 'ABORT: installer changed after verification'; return 3 }
+  # Last look right before the installer starts; the installer's own check (exit 75 below) covers
+  # anyone who opens the app in the second between this line and the installer's check.
+  if (@(Get-AppProcesses).Count -gt 0) { Write-Log "deferred: $AppExe was opened before the install started"; return 0 }
   Write-Log "installing $available"
-  $p = Start-Process -FilePath $installer -ArgumentList '/S', '--updated' -Wait -PassThru
+  # SYNC: system-update-defer - build/installer.nsh customCheckAppRunning: with --fww-system-update
+  # a running copy makes the installer exit 75 without touching anything, instead of force-closing it.
+  $p = Start-Process -FilePath $installer -ArgumentList '/S', '--updated', '--fww-system-update' -Wait -PassThru
+  if ($p.ExitCode -eq 75) { Write-Log "deferred: $AppExe was opened as the installer started (installer exit 75)"; return 0 }
   $after = Get-InstalledVersion $exe
   Remove-Item -Force $installer -ErrorAction SilentlyContinue
   if ($p.ExitCode -ne 0 -or $after -lt $available) {

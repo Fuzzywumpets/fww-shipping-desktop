@@ -23,6 +23,28 @@
   ${EndIf}
 !macroend
 
+; customCheckAppRunning: electron-builder's default (_CHECK_APP_RUNNING) force-closes every running
+; copy of the app in every account during a silent per-machine install. When fww-update.ps1 runs the
+; installer it passes --fww-system-update, and then a running copy makes the installer quit with
+; exit code 75 (nothing touched) so the updater defers instead of closing a packer's app mid-label.
+; Every other run (manual install, the old uninstaller during an update) keeps the default.
+; SYNC: system-update-defer - fww-update.ps1 passes --fww-system-update and treats exit 75 as "deferred".
+!macro customCheckAppRunning
+  ClearErrors
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "--fww-system-update" $R1
+  ${if} ${Errors}
+    !insertmacro _CHECK_APP_RUNNING
+  ${else}
+    !insertmacro FIND_PROCESS "${APP_EXECUTABLE_FILENAME}" $R0
+    ${if} $R0 == 0
+      DetailPrint `"${PRODUCT_NAME}" is running: system update deferred`
+      SetErrorLevel 75
+      Quit
+    ${endIf}
+  ${endIf}
+!macroend
+
 !macro customInstall
   !insertmacro fwwPowerShell $R8
   DetailPrint "Registering ${PRODUCT_NAME} Updater task"

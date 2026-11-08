@@ -135,6 +135,24 @@ Check 'app still running in some session: deferred, exit 0, no install' {
   Assert ($r.log -notmatch 'dry run: would run') 'must not reach the install step'
 }
 
+Check 'sha512 that differs only in letter case is rejected (Base64 is case-sensitive)' {
+  $flip = if ($sha[0] -cmatch '[a-z]') { $sha.Substring(0,1).ToUpper() } elseif ($sha[0] -cmatch '[A-Z]') { $sha.Substring(0,1).ToLower() } else { $null }
+  $i = 0; while (-not $flip) { $i++; $c = $sha[$i]; if ($c -cmatch '[a-z]') { $flip = "$c".ToUpper() } elseif ($c -cmatch '[A-Z]') { $flip = "$c".ToLower() } }
+  $caseSha = $sha.Substring(0, $i) + $flip + $sha.Substring($i + 1)
+  Assert ($caseSha -ne $sha -and $caseSha -ieq $sha) 'test setup: same letters, different case'
+  "version: 1.0.5`npath: FWW-Shipping-Setup-1.0.5.exe`nsha512: $caseSha`n" | Set-Content (Join-Path $feedDir 'case.yml')
+  $r = Run-Updater 'case' @('-AppExe', 'no-such-app.exe', '-FeedUrl', ([Uri](Join-Path $feedDir 'case.yml')).AbsoluteUri, '-InstalledVersion', '1.0.0')
+  Assert ($r.code -eq 3) "exit $($r.code): $($r.log)"
+  Assert ($r.log -match 'sha512 mismatch') $r.log
+}
+
+Check 'missing app exe (interrupted install) counts as 0.0.0 so the next run repairs it' {
+  $r = Run-Updater 'heal' @('-AppExe', 'no-such-app.exe', '-FeedUrl', $feedUrl)
+  Assert ($r.code -eq 0) "exit $($r.code): $($r.log)"
+  Assert ($r.log -match 'treating the installed version as 0\.0\.0') $r.log
+  Assert ($r.log -match 'update 0\.0\.0 -> 1\.0\.5') $r.log
+}
+
 Check 'installed layout without -InstallDir: install dir comes from the script location (PS 5.1 param-default bug)' {
   $lay = Join-Path $tmp 'layout'; $upd = Join-Path $lay 'resources\updater'; New-Item -ItemType Directory -Path $upd -Force | Out-Null
   Copy-Item $script (Join-Path $upd 'fww-update.ps1')

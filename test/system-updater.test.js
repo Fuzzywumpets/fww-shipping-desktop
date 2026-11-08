@@ -99,7 +99,18 @@ test('fww-update.ps1 never installs while the app runs and verifies sha512 first
   const iWait = inv.indexOf('Get-AppProcesses).Count -gt 0');
   const iRun = inv.indexOf("Start-Process -FilePath $installer");
   assert.ok(iHash > 0 && iWait > iHash && iRun > iWait, 'order must be: verify hash, wait for app exit, run');
-  assert.match(inv, /'\/S', '--updated'/);
+  assert.match(inv, /'\/S', '--updated', '--fww-system-update'/);
+  const iLast = inv.indexOf('Get-AppProcesses).Count -gt 0', iWait + 1);
+  assert.ok(iLast > iWait && iLast < iRun, 'a last process check sits right before the installer');
+  assert.match(inv, /ExitCode -eq 75\) \{ Write-Log "deferred/);
+  assert.doesNotMatch(updatePs1, /\$(actual|feed\.sha512)[^\n]*\s-ne\s/, 'Base64 hashes must be compared case-sensitively (-cne)');
+});
+
+test('SYNC system-update-defer: the installer defers (exit 75) instead of force-closing when the updater runs it', () => {
+  const m = nsh.slice(nsh.indexOf('!macro customCheckAppRunning'), nsh.indexOf('!macroend', nsh.indexOf('!macro customCheckAppRunning')));
+  assert.match(m, /\$\{GetOptions\} \$R0 "--fww-system-update" \$R1/);
+  assert.match(m, /\$\{if\} \$\{Errors\}\s+!insertmacro _CHECK_APP_RUNNING/, 'without the flag keep the default behaviour');
+  assert.match(m, /SetErrorLevel 75\s+Quit/);
 });
 
 test('main.js: machine-managed mode returns before the legacy dialogs and never calls quitAndInstall itself', () => {
