@@ -4,7 +4,7 @@
  *
  * In the MAIN process entry (e.g. main.js), as early as possible:
  *   const { installMain } = require("./fww-logsink.cjs");
- *   installMain({ app: "fww-shipping-desktop", repo: "fuzzyalex84/fww-shipping-desktop" });
+ *   installMain({ app: "fww-shipping-desktop", repo: "Fuzzywumpets/fww-shipping-desktop" });
  *
  * Optionally in a renderer preload, forward window errors over IPC to main, or set
  * ERROR_SINK_URL/ERROR_SINK_BEARER and call reportEvent directly.

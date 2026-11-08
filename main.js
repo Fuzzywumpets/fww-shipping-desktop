@@ -22,7 +22,7 @@ const { buildLabelHtml, validateLabelPngPayload } = require('./label-print');
 try {
   require('./fww-logsink.cjs').installMain({
     app: 'fww-shipping-desktop',
-    repo: 'fuzzyalex84/fww-shipping-desktop',
+    repo: 'Fuzzywumpets/fww-shipping-desktop',
     url: 'https://errors.fuzzyreporting.com',
     bearer: process.env.ERROR_SINK_BEARER,
   });
@@ -358,7 +358,7 @@ function createMainWindow() {
       console.warn('[fww-shell] refused non-web window.open:', JSON.stringify(String(url || '')));
       try {
         require('./fww-logsink.cjs').reportEvent({
-          app: 'fww-shipping-desktop', repo: 'fuzzyalex84/fww-shipping-desktop',
+          app: 'fww-shipping-desktop', repo: 'Fuzzywumpets/fww-shipping-desktop',
           kind: 'warn', severity: 'warning',
           message: 'refused non-web window.open (would have popped the OS "no app for this link" dialog)',
           context: { url: String(url || ''), scheme: (String(url || '').split(':')[0] || '(empty)') },
