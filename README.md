@@ -22,7 +22,7 @@ repo; this app just loads it). No bundled app logic to keep in sync.
 | **Silent slip printing** | Intercepts the packing-slip render page and prints to the configured slip printer (e.g. Canon, Letter). |
 | **Print Manager** | Built-in settings window: choose label printer + slip printer independently, paper sizes, copies, auto-print toggles, and **test prints**. |
 | **Runs in background** | Closing the window minimizes to the system tray so auto-printing keeps working. Tray menu has quick auto-print toggles + "Open app". |
-| **Auto-update** | `electron-updater` checks GitHub Releases on launch and every 4h; prompts to restart when a new version is downloaded. |
+| **Auto-update** | `electron-updater` checks GitHub Releases on launch and every 4h. Installs that carry the SYSTEM updater are **machine-managed**: a SYSTEM scheduled task installs the update silently once the app is closed in every account, with no admin password (see "Updates without an admin password"). |
 
 ---
 
@@ -130,6 +130,43 @@ in under their own accounts.
 That is the exact failure this setting fixes — it is load-bearing, not cosmetic.
 Because `package.json` is JSON and cannot carry a `DEPENDS:` comment, this note
 is the dependency marker.
+
+### Updates without an admin password
+
+A per-machine install lives in Program Files, so electron-updater can only apply
+an update through `elevate.exe`. That raises UAC, and on a staff (standard)
+account it asks for an admin password. electron-builder marks every per-machine
+`latest.yml` with `isAdminRightsRequired: true`.
+
+So the installer also registers a SYSTEM scheduled task, **`FWW Shipping Updater`**
+(`build/installer.nsh` → `updater/register-task.ps1`). It runs at boot, at any
+logon and hourly, and executes `updater/fww-update.ps1`, which:
+
+1. reads `latest.yml` from the repo named in `resources\app-update.yml`;
+2. downloads the installer into `C:\ProgramData\FWW Shipping\updates`
+   (SYSTEM and Administrators write only);
+3. verifies the installer's sha512;
+4. **waits until FWW Shipping is closed in every Windows account**, because a
+   silent per-machine install force-closes every copy;
+5. runs the installer with `/S --updated`.
+
+The log is `C:\ProgramData\FWW Shipping\updater.log`.
+
+In the app, `updater-mode.js` sees `resources\updater\system-updates.json` (the
+installer writes it only after the task is registered) and switches
+electron-updater to **check only**. When an update is available, it offers "Quit
+and Update", and quitting starts the task at once (Users may run the task; they
+cannot change it). Without that file (a failed registration, or a dev run) the
+old electron-updater path is used unchanged.
+
+**Rollout:** the first release that contains this still arrives through the old
+path, so that one update needs the admin password once per PC. After it, updates
+need no password. If another account had already downloaded that same release,
+it may show one more UAC prompt when it quits; cancel it, because the machine is
+already updated.
+
+Tests: `npm test` (node) and, on Windows, elevated
+`powershell -NoProfile -ExecutionPolicy Bypass -File test\fww-update.tests.ps1`.
 
 ---
 

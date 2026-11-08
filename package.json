@@ -46,6 +46,7 @@
     "nsis": {
       "oneClick": true,
       "perMachine": true,
+      "include": "build/installer.nsh",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
@@ -58,11 +59,22 @@
     "files": [
       "main.js",
       "label-print.js",
+      "updater-mode.js",
       "fww-logsink.cjs",
       "preload.js",
       "print-manager.html",
       "auth.html",
       "assets/**"
+    ],
+    "extraResources": [
+      {
+        "from": "updater",
+        "to": "updater",
+        "filter": [
+          "fww-update.ps1",
+          "register-task.ps1"
+        ]
+      }
     ]
   }
 }
