@@ -133,7 +133,7 @@ function Get-AppProcesses {
 function Invoke-Update {
   Protect-Dir $DataDir
   Write-Log "run: install dir $InstallDir, app $AppExe"
-  Set-Location $DataDir   # never hold a handle on $InstallDir: the update deletes and rewrites it
+  Set-Location $DataDir   # never hold a handle on $InstallDir (the update deletes and rewrites it)
   $work = Join-Path $DataDir 'updates'
   Protect-Dir $work
 
