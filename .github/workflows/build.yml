@@ -3,6 +3,13 @@ name: Build & Release
 on:
   push:
     tags:
+      # SYNC: the pushed tag MUST be exactly v<package.json "version"> — electron-builder
+      # derives the release version, the installer name (FWW-Shipping-Setup-${version}.exe),
+      # and latest.yml's contents from package.json, NOT from the tag. Pushing v1.0.19
+      # while package.json still says 1.0.18 publishes a latest.yml that advertises
+      # 1.0.18, so every installed client's auto-update silently stops seeing new
+      # versions (same trap that broke fww-b2b-admin). Bump package.json "version"
+      # FIRST, commit, then tag that commit with the matching v<version>.
       - 'v*'
   workflow_dispatch:
 
